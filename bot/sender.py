@@ -1,3 +1,4 @@
+import json
 import time
 import logging
 import httpx
@@ -32,11 +33,23 @@ class TelegramSender:
         description = row.get('description', '').strip()
         message_link = row.get('tg_message_link', '').strip()
         channel_link = row.get('tg_channel_link', '').strip()
+        matched_keywords = row.get('matched_keywords') or []
 
         if not description:
             raise ValueError(f"Message {row.get('id')} missing description")
 
+        if isinstance(matched_keywords, str):
+            try:
+                matched_keywords = json.loads(matched_keywords)
+            except (json.JSONDecodeError, TypeError):
+                matched_keywords = []
+        matched_keywords = matched_keywords or []
+
         text = f"{description}\n\n"
+
+        if matched_keywords:
+            text += f"🔑 {', '.join(matched_keywords)}\n\n"
+
         links = []
         if message_link:
             links.append(f'<a href="{message_link}">Message</a>')
