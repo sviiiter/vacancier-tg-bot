@@ -9,16 +9,15 @@ log = logging.getLogger(__name__)
 class TelegramSender:
     _api_base = "https://api.telegram.org/bot{token}/{method}"
 
-    def __init__(self, token: str, chat_id: str, send_delay: float = 0.5) -> None:
+    def __init__(self, token: str, send_delay: float = 0.5) -> None:
         self._token = token
-        self._chat_id = chat_id
         self._send_delay = send_delay
         self._client = httpx.Client(timeout=15)
 
-    def send_message(self, text: str) -> None:
+    def send_message(self, text: str, chat_id: str) -> None:
         url = self._api_base.format(token=self._token, method="sendMessage")
-        payload = {"chat_id": self._chat_id, "text": text, "parse_mode": "HTML"}
-        log.debug("Sending message - chat_id=%s, text_len=%d", self._chat_id, len(text))
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        log.debug("Sending message - chat_id=%s, text_len=%d", chat_id, len(text))
         resp = self._client.post(url, json=payload)
         if resp.status_code != 200:
             log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)

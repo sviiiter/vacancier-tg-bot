@@ -12,7 +12,7 @@ def _require(key: str) -> str:
 
 
 BOT_TOKEN: str = _require("BOT_TOKEN")
-CHAT_ID: str = _require("CHAT_ID")
+CHAT_ID: str | None = os.getenv("CHAT_ID")  # Optional: only used for backwards-compat single-recipient mode
 DB_DRIVER: str = os.getenv("DB_DRIVER", "sqlite")
 DB_DSN: str = _require("DB_DSN")
 BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "10"))

@@ -1,210 +1,188 @@
 # Vacancier Telegram Bot
 
-A Telegram bot that manages and distributes job vacancy messages to a Telegram channel. The bot polls a database for pending messages and sends them in batches at configurable intervals.
+A multi-user Telegram bot that broadcasts job vacancy postings to subscribers. Users can subscribe to receive job postings, with support for future billing tiers built in.
 
 ## Features
 
-- **Database Agnostic**: Supports SQLite, PostgreSQL, and MySQL backends
-- **Batch Processing**: Sends messages in configurable batches
-- **Message Tracking**: Tracks which messages have been sent
-- **Graceful Shutdown**: Handles SIGINT and SIGTERM signals
-- **Docker Ready**: Includes Dockerfile for containerized deployment
-- **Configurable**: All behavior controlled via environment variables
+- **Multi-user subscriptions**: Users `/subscribe` via Telegram to receive job postings; `/unsubscribe` to stop
+- **Command-based management**: `/start`, `/subscribe`, `/stop`, `/unsubscribe`, `/help`
+- **Multi-database support**: PostgreSQL, SQLite, MySQL
+- **Forward-compatible billing**: `plan` column stubbed for future paid tiers
+- **Persistent state**: Remembers Telegram update offset across restarts (no message duplication or missed commands)
+- **Graceful shutdown**: Handles SIGINT/SIGTERM signals cleanly
+- **Partial delivery tolerance**: Marks message sent if delivered to *any* active subscriber (not all-or-nothing)
 
-## Requirements
+## Architecture
 
-- Python 3.12+
-- SQLite, PostgreSQL, or MySQL (depending on configuration)
+The bot runs two parallel loops:
+
+1. **Update polling**: Listens for incoming Telegram commands (`/subscribe`, `/unsubscribe`, `/help`)
+2. **Message broadcasting**: Fetches pending job messages and sends them to all active subscribers
+
+Each message is marked `queue_sent=1` only after being delivered to at least one active subscriber (graceful partial failure: if 3 of 4 subscribers fail, the message is still marked sent if it reached 1+).
 
 ## Installation
 
-### Local Setup
-
-1. Clone the repository and navigate to the bot directory:
 ```bash
-cd vacancier-tg-bot
-```
-
-2. Install dependencies:
-```bash
-make install
-# or
 pip install -r requirements.txt
-```r
-
-3. Copy the environment template and configure it:
-```bash
-cp .env.example .env
-```
-
-4. Initialize the database (for SQLite):
-```bash
-make init-db
 ```
 
 ## Configuration
 
-Create a `.env` file with the following variables:
+Set environment variables (or add to a `.env` file):
 
-### Required Variables
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BOT_TOKEN` | Yes | — | Telegram bot token from [@BotFather](https://t.me/botfather) |
+| `DB_DRIVER` | No | `sqlite` | Database driver: `postgres`, `sqlite`, `mysql` |
+| `DB_DSN` | Yes | — | Database connection string |
+| `BATCH_SIZE` | No | `10` | Messages to fetch per poll |
+| `POLL_INTERVAL_SEC` | No | `60` | Seconds between message polls |
+| `SEND_DELAY_SEC` | No | `0.5` | Delay between sending to each subscriber (rate limiting) |
+| `CHAT_ID` | No | — | *Deprecated*: only used for single-recipient backwards-compat mode |
 
-- `BOT_TOKEN`: Your Telegram bot token from [@BotFather](https://t.me/botfather)
-- `CHAT_ID`: The Telegram channel/chat ID where messages will be sent (negative for channels)
-- `DB_DSN`: Database connection string or path
-
-### Optional Variables
-
-- `DB_DRIVER`: Database backend (default: `sqlite`)
-  - `sqlite`: Local SQLite database
-  - `postgres`: PostgreSQL database
-  - `mysql`: MySQL database
-- `BATCH_SIZE`: Number of messages to send per batch (default: `10`)
-- `POLL_INTERVAL_SEC`: Seconds between polls (default: `60`)
-- `SEND_DELAY_SEC`: Delay between individual message sends in seconds (default: `0.5`)
-
-### Example Configuration
-
-**SQLite (local):**
-```env
-BOT_TOKEN=123456789:AABBccDDeeFFggHH
-CHAT_ID=-1001234567890
-DB_DRIVER=sqlite
-DB_DSN=./messages.db
-BATCH_SIZE=10
-POLL_INTERVAL_SEC=60
-SEND_DELAY_SEC=0.5
-```
+### Database Connection Examples
 
 **PostgreSQL:**
-```env
-BOT_TOKEN=123456789:AABBccDDeeFFggHH
-CHAT_ID=-1001234567890
-DB_DRIVER=postgres
-DB_DSN=postgres://user:password@localhost:5432/vacancies
+```
+postgresql://user:password@localhost:5432/vacancier
+```
+
+**SQLite:**
+```
+/path/to/vacancier.db
 ```
 
 **MySQL:**
-```env
-BOT_TOKEN=123456789:AABBccDDeeFFggHH
-CHAT_ID=-1001234567890
-DB_DRIVER=mysql
-DB_DSN=mysql://user:password@localhost:3306/vacancies
+```
+mysql://user:password@localhost:3306/vacancier
 ```
 
 ## Database Schema
 
-The bot expects a `messages` table with the following structure:
+### `subscribers`
+Stores user subscriptions.
 
-```sql
-CREATE TABLE messages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    description     TEXT NOT NULL,
-    tg_channel_link TEXT NOT NULL,
-    tg_message_link TEXT NOT NULL UNIQUE,
-    created_date    TEXT NOT NULL,
-    queue_sent      INTEGER NOT NULL DEFAULT 0,
-    read            INTEGER NOT NULL DEFAULT 0
-);
-```
+| Column | Type | Default | Notes |
+|--------|------|---------|-------|
+| `id` | INT PRIMARY KEY | Auto-increment | |
+| `chat_id` | TEXT UNIQUE | — | Telegram user ID |
+| `username` | TEXT | NULL | Telegram username |
+| `active` | INT | `1` | Soft delete (0 = unsubscribed) |
+| `plan` | TEXT | `'free'` | Reserved for future billing (unused now) |
+| `subscribed_at` | TIMESTAMP | Now | |
+
+### `messages`
+Job vacancy messages from the parser.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INT PRIMARY KEY | |
+| `description` | TEXT | HTML-stripped job description |
+| `tg_channel_link` | TEXT | Source channel link |
+| `tg_message_link` | TEXT UNIQUE | Original message URL |
+| `created_date` | TIMESTAMP | When job was posted |
+| `source` | TEXT | Job board source |
+| `queue_sent` | INT | Broadcast status (0 = pending, 1 = sent) |
+| `read` | INT | Read status |
+| `matched_keywords` | JSONB | Array of matching keyword groups |
+
+### `bot_state`
+Persistent state for the bot.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `key` | TEXT PRIMARY KEY | State key (e.g., `'last_update_id'`) |
+| `value` | TEXT | State value |
 
 ## Usage
 
-### Running Locally
+### Start the bot
 
 ```bash
-make run
-# or
-python -m bot.main
+python bot/main.py
 ```
 
-### Running with Docker
-
-Build the image:
+Or with custom config:
 ```bash
-docker build -t vacancier-bot .
+BOT_TOKEN=your_token DB_DSN=postgresql://... python bot/main.py
 ```
 
-Run the container:
-```bash
-docker compose up
-```
+### User Commands (in Telegram)
 
-## Architecture
+Send any of these to the bot:
 
-### Core Components
-
-- **`bot/main.py`**: Main event loop that polls the database and orchestrates message sending
-- **`bot/config.py`**: Loads and validates environment configuration
-- **`bot/sender.py`**: Handles Telegram API communication
-- **`bot/db/`**: Database abstraction layer with driver implementations
-  - `base.py`: Abstract database interface
-  - `sqlite.py`: SQLite driver
-  - `postgres.py`: PostgreSQL driver
-  - `mysql.py`: MySQL driver
-
-### Workflow
-
-1. Bot loads configuration from environment variables
-2. Connects to configured database backend
-3. Continuously polls database at configured interval for pending messages
-4. Retrieves batch of pending messages (query filters by `queue_sent == 0`)
-5. Sends each message to Telegram channel with delay between sends
-6. Marks successfully sent messages in database (`queue_sent = 1`)
-7. Logs all operations and errors
+- `/start` — Subscribe to job postings
+- `/subscribe` — Alias for `/start`
+- `/stop` — Unsubscribe
+- `/unsubscribe` — Alias for `/stop`
+- `/help` — Show available commands
 
 ## Development
+
+### Running Tests
+
+```bash
+python3 -m pytest tests/ -v
+```
+
+Test coverage:
+- `test_db.py`: Subscriber management (add, remove, reactivate, persistence)
+- `test_sender.py`: Message formatting and Telegram API calls
 
 ### Project Structure
 
 ```
-vacancier-tg-bot/
-├── bot/
-│   ├── __init__.py
-│   ├── main.py           # Main event loop
-│   ├── config.py         # Configuration management
-│   ├── sender.py         # Telegram sender
-│   └── db/
-│       ├── __init__.py
-│       ├── base.py       # Abstract base class
-│       ├── sqlite.py     # SQLite implementation
-│       ├── postgres.py   # PostgreSQL implementation
-│       └── mysql.py      # MySQL implementation
-├── .env                  # Environment configuration (local only)
-├── .env.example          # Configuration template
-├── requirements.txt      # Python dependencies
-├── Dockerfile            # Container definition
-├── Makefile             # Development tasks
-└── README.md            # This file
+bot/
+├── main.py              # Main event loop (polling + broadcasting)
+├── sender.py            # Telegram API sender
+├── updates.py           # Incoming command handler
+├── config.py            # Environment configuration
+└── db/
+    ├── base.py          # Abstract driver interface
+    ├── postgres.py      # PostgreSQL implementation
+    ├── sqlite.py        # SQLite implementation
+    └── mysql.py         # MySQL implementation
+tests/
+├── test_sender.py       # Sender unit tests
+└── test_db.py           # Database layer tests
 ```
-
-### Adding a New Database Driver
-
-1. Create a new driver file in `bot/db/` (e.g., `sqlite.py`)
-2. Inherit from `bot.db.base.DatabaseDriver`
-3. Implement required methods:
-   - `get_pending(batch_size)`: Retrieve pending messages
-   - `mark_sent(message_ids)`: Mark messages as sent
-   - `close()`: Close database connection
-4. Register the driver in `bot/db/__init__.py`
 
 ## Troubleshooting
 
-### Bot not sending messages
-- Check that `BOT_TOKEN` is valid
-- Verify `CHAT_ID` is correct and the bot has permissions to post
-- Ensure database contains messages with `queue_sent = 0`
-- Check logs for errors: `python -m bot.main`
+### Bot not receiving commands
+- Verify `BOT_TOKEN` is valid (check with `curl https://api.telegram.org/bot$BOT_TOKEN/getMe`)
+- Ensure database is accessible (`DB_DSN`)
+- Check logs for "Started. driver=..." message
+- Watch for "Error handling update" logs
 
-### Database connection errors
-- Verify `DB_DSN` is correct for your database type
-- Ensure database server is running and accessible
-- Check database user permissions
+### Subscribers not receiving messages
+- Confirm they ran `/start` or `/subscribe`
+- Check `subscribers.active=1` in database
+- Verify `messages.queue_sent=0` on pending jobs
+- Check Telegram API rate limits (default 0.5s delay between sends)
 
-### Performance tuning
-- Increase `BATCH_SIZE` to send more messages per poll cycle
-- Decrease `POLL_INTERVAL_SEC` to check database more frequently
-- Adjust `SEND_DELAY_SEC` to control API rate limiting
+### Bot reprocesses old updates after restart
+- Delete the `bot_state` row where `key='last_update_id'` to reset
+- Bot persists offset to prevent re-handling commands after restart
+
+### "No active subscribers" but messages are marked sent
+- By design: bot marks message sent if delivered to any subscriber
+- If all subscriber sends fail, message is still counted as sent (to avoid retries)
+
+## Billing Integration (Future)
+
+The `subscribers.plan` column is reserved for paid tiers. Example future integration:
+
+```python
+# Filter by plan tier
+BILLABLE_PLANS = {'pro', 'team', 'enterprise'}
+active = [s for s in driver.list_active_subscribers() 
+          if get_plan(s) in BILLABLE_PLANS]
+```
+
+Currently all subscribers are treated equally (free tier).
 
 ## License
 
-MIT
+Part of the Vacancier job board aggregator.
