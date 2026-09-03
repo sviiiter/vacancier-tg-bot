@@ -41,7 +41,7 @@ def run() -> None:
 
     while True:
         try:
-            # Poll for incoming updates (subscribe/unsubscribe commands)
+            # Poll for incoming updates (commands, payments, etc.)
             updates = update_handler.get_updates(update_offset)
             for update in updates:
                 try:
@@ -50,6 +50,15 @@ def run() -> None:
                     driver.set_last_update_id(update_offset)
                 except Exception as exc:
                     log.error("Error handling update id=%s: %s", update.get("update_id"), exc)
+
+            # Downgrade expired subscribers
+            expired = driver.downgrade_expired_subscribers()
+            for chat_id in expired:
+                try:
+                    sender.send_message("Your subscription has expired. Use /upgrade to renew.", chat_id)
+                    log.info("Notified expired subscriber: chat_id=%s", chat_id)
+                except Exception as exc:
+                    log.error("Failed to notify expired subscriber %s: %s", chat_id, exc)
 
             # Fetch and broadcast pending messages to all subscribers
             rows = driver.get_pending(cfg.BATCH_SIZE)

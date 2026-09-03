@@ -30,5 +30,21 @@ class DatabaseDriver(ABC):
     def set_last_update_id(self, update_id: int) -> None:
         """Save the last processed Telegram update_id."""
 
+    @abstractmethod
+    def record_payment(self, chat_id: str, plan: str, amount: int, charge_id: str, is_recurring: int) -> bool:
+        """Record a payment; return False if charge_id already exists (idempotency)."""
+
+    @abstractmethod
+    def activate_paid_plan(self, chat_id: str, plan: str, expires_at: str, charge_id: str | None = None) -> None:
+        """Activate a paid plan for a subscriber."""
+
+    @abstractmethod
+    def get_subscriber(self, chat_id: str) -> dict | None:
+        """Fetch a single subscriber by chat_id."""
+
+    @abstractmethod
+    def downgrade_expired_subscribers(self) -> list[str]:
+        """Downgrade expired subscribers to 'free' plan, return affected chat_ids."""
+
     def close(self) -> None:
         pass
