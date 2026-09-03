@@ -45,7 +45,7 @@ def run() -> None:
             updates = update_handler.get_updates(update_offset)
             for update in updates:
                 try:
-                    update_handяler.handle_update(update, driver, sender)
+                    update_handler.handle_update(update, driver, sender)
                     update_offset = update["update_id"] + 1
                     driver.set_last_update_id(update_offset)
                 except Exception as exc:
