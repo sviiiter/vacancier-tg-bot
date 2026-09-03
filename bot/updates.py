@@ -33,7 +33,7 @@ class UpdateHandler:
             return
 
         message = update["message"]
-        chat_id = str(message.get("chat_id"))
+        chat_id = str(message.get("chat", {}).get("id"))
         username = message.get("from", {}).get("username")
         text = message.get("text", "").strip()
 
