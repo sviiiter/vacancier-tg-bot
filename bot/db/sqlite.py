@@ -90,6 +90,29 @@ class SQLiteDriver(DatabaseDriver):
         self._conn.commit()
         return expired
 
+    def list_broadcastable_subscribers(self) -> list[dict]:
+        cur = self._conn.execute(
+            "SELECT chat_id, plan, messages_received, subscribed_at, trial_notice_sent FROM subscribers WHERE active = 1"
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def increment_messages_received(self, chat_ids: list[str]) -> None:
+        if not chat_ids:
+            return
+        placeholders = ",".join("?" * len(chat_ids))
+        self._conn.execute(
+            f"UPDATE subscribers SET messages_received = messages_received + 1 WHERE chat_id IN ({placeholders})",
+            chat_ids,
+        )
+        self._conn.commit()
+
+    def mark_trial_notice_sent(self, chat_id: str) -> None:
+        self._conn.execute(
+            "UPDATE subscribers SET trial_notice_sent = 1 WHERE chat_id = ?",
+            (chat_id,),
+        )
+        self._conn.commit()
+
     def _init_schema(self) -> None:
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS subscribers (
@@ -100,7 +123,9 @@ class SQLiteDriver(DatabaseDriver):
                 plan TEXT NOT NULL DEFAULT 'free',
                 subscribed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 expires_at DATETIME,
-                star_charge_id TEXT
+                star_charge_id TEXT,
+                messages_received INTEGER NOT NULL DEFAULT 0,
+                trial_notice_sent INTEGER NOT NULL DEFAULT 0
             )
         """)
         self._conn.execute("""

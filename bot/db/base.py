@@ -46,5 +46,17 @@ class DatabaseDriver(ABC):
     def downgrade_expired_subscribers(self) -> list[str]:
         """Downgrade expired subscribers to 'free' plan, return affected chat_ids."""
 
+    @abstractmethod
+    def list_broadcastable_subscribers(self) -> list[dict]:
+        """List active subscribers with full row data for trial gating."""
+
+    @abstractmethod
+    def increment_messages_received(self, chat_ids: list[str]) -> None:
+        """Increment messages_received count for the given chat_ids."""
+
+    @abstractmethod
+    def mark_trial_notice_sent(self, chat_id: str) -> None:
+        """Mark trial notice as sent for a chat_id."""
+
     def close(self) -> None:
         pass

@@ -119,6 +119,32 @@ class MySQLDriver(DatabaseDriver):
         self._conn.commit()
         return expired
 
+    def list_broadcastable_subscribers(self) -> list[dict]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT chat_id, plan, messages_received, subscribed_at, trial_notice_sent FROM subscribers WHERE active = 1"
+            )
+            return cur.fetchall()
+
+    def increment_messages_received(self, chat_ids: list[str]) -> None:
+        if not chat_ids:
+            return
+        placeholders = ",".join(["%s"] * len(chat_ids))
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE subscribers SET messages_received = messages_received + 1 WHERE chat_id IN ({placeholders})",
+                chat_ids,
+            )
+        self._conn.commit()
+
+    def mark_trial_notice_sent(self, chat_id: str) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET trial_notice_sent = 1 WHERE chat_id = %s",
+                (chat_id,),
+            )
+        self._conn.commit()
+
     def _init_schema(self) -> None:
         with self._conn.cursor() as cur:
             cur.execute("""
@@ -130,7 +156,9 @@ class MySQLDriver(DatabaseDriver):
                     plan VARCHAR(50) NOT NULL DEFAULT 'free',
                     subscribed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     expires_at DATETIME,
-                    star_charge_id VARCHAR(255)
+                    star_charge_id VARCHAR(255),
+                    messages_received INT NOT NULL DEFAULT 0,
+                    trial_notice_sent INT NOT NULL DEFAULT 0
                 )
             """)
             cur.execute("""

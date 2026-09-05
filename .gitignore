@@ -1,3 +1,4 @@
 tests/__pycache__/
 bot/db/__pycache__/
 bot/__pycache__/
+.env

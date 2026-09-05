@@ -87,3 +87,39 @@ class TestSQLiteDriver(unittest.TestCase):
         self.assertEqual(sub1["plan"], "free")
         sub2 = self.driver.get_subscriber("222222")
         self.assertEqual(sub2["plan"], "monthly")
+
+    def test_list_broadcastable_subscribers(self) -> None:
+        self.driver.add_subscriber("111111", "user1")
+        self.driver.add_subscriber("222222", "user2")
+        self.driver.add_subscriber("333333", "user3")
+        subs = self.driver.list_broadcastable_subscribers()
+        self.assertEqual(len(subs), 3)
+        chat_ids = [sub["chat_id"] for sub in subs]
+        self.assertIn("111111", chat_ids)
+        self.assertIn("222222", chat_ids)
+        self.assertIn("333333", chat_ids)
+        for sub in subs:
+            self.assertEqual(sub["plan"], "free")
+            self.assertEqual(sub["messages_received"], 0)
+
+    def test_increment_messages_received(self) -> None:
+        self.driver.add_subscriber("111111", "user1")
+        self.driver.add_subscriber("222222", "user2")
+        self.driver.increment_messages_received(["111111", "222222"])
+        sub1 = self.driver.get_subscriber("111111")
+        sub2 = self.driver.get_subscriber("222222")
+        self.assertEqual(sub1["messages_received"], 1)
+        self.assertEqual(sub2["messages_received"], 1)
+        self.driver.increment_messages_received(["111111"])
+        sub1 = self.driver.get_subscriber("111111")
+        sub2 = self.driver.get_subscriber("222222")
+        self.assertEqual(sub1["messages_received"], 2)
+        self.assertEqual(sub2["messages_received"], 1)
+
+    def test_mark_trial_notice_sent(self) -> None:
+        self.driver.add_subscriber("123456", "testuser")
+        sub = self.driver.get_subscriber("123456")
+        self.assertEqual(sub["trial_notice_sent"], 0)
+        self.driver.mark_trial_notice_sent("123456")
+        sub = self.driver.get_subscriber("123456")
+        self.assertEqual(sub["trial_notice_sent"], 1)

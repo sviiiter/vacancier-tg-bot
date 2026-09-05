@@ -8,6 +8,7 @@ import bot.config as cfg
 from bot.db import get_driver
 from bot.sender import TelegramSender
 from bot.updates import UpdateHandler
+from bot.trial import is_trial_active
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,26 +61,59 @@ def run() -> None:
                 except Exception as exc:
                     log.error("Failed to notify expired subscriber %s: %s", chat_id, exc)
 
-            # Fetch and broadcast pending messages to all subscribers
+            # Fetch and broadcast pending messages to eligible subscribers
             rows = driver.get_pending(cfg.BATCH_SIZE)
             if rows:
-                subscribers = driver.list_active_subscribers()
-                if not subscribers:
+                all_subs = driver.list_broadcastable_subscribers()
+                if not all_subs:
                     log.debug("No active subscribers, skipping %d pending message(s).", len(rows))
                     driver.mark_sent([row["id"] for row in rows])
                 else:
-                    log.info("Broadcasting %d message(s) to %d subscriber(s)…", len(rows), len(subscribers))
+                    log.info("Broadcasting %d message(s) to %d active subscriber(s)…", len(rows), len(all_subs))
                     sent_ids: list[int] = []
+                    received_by_free: list[str] = []
+
                     for row in rows:
                         failed_subscribers: list[str] = []
-                        for chat_id in subscribers:
+                        trial_locked_out: list[str] = []
+
+                        for sub in all_subs:
+                            chat_id = sub["chat_id"]
+                            if not is_trial_active(sub, cfg.TRIAL_TYPE, cfg.TRIAL_MESSAGE_LIMIT, cfg.TRIAL_DAYS):
+                                trial_locked_out.append(chat_id)
+                                continue
+
                             try:
                                 sender.send_message(TelegramSender.format_message(row), chat_id)
+                                if sub["plan"] == "free":
+                                    received_by_free.append(chat_id)
                             except Exception as exc:
                                 log.error("Failed to send message id=%s to chat_id=%s: %s", row["id"], chat_id, exc)
                                 failed_subscribers.append(chat_id)
-                        if len(failed_subscribers) < len(subscribers):
+
+                        if len(failed_subscribers) < len(all_subs):
                             sent_ids.append(row["id"])
+
+                        if received_by_free:
+                            driver.increment_messages_received(received_by_free)
+
+                    # Send trial-ended notices to locked-out free subscribers (once per user)
+                    for sub in all_subs:
+                        if (
+                            sub["plan"] == "free"
+                            and not is_trial_active(sub, cfg.TRIAL_TYPE, cfg.TRIAL_MESSAGE_LIMIT, cfg.TRIAL_DAYS)
+                            and not sub["trial_notice_sent"]
+                        ):
+                            try:
+                                sender.send_message(
+                                    "Your free trial has ended. Use /upgrade to keep receiving job postings.",
+                                    sub["chat_id"],
+                                )
+                                driver.mark_trial_notice_sent(sub["chat_id"])
+                                log.info("Sent trial-ended notice to chat_id=%s", sub["chat_id"])
+                            except Exception as exc:
+                                log.error("Failed to send trial-ended notice to %s: %s", sub["chat_id"], exc)
+
                     if sent_ids:
                         driver.mark_sent(sent_ids)
                         log.info("Marked %d message(s) as sent.", len(sent_ids))
