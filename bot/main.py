@@ -44,7 +44,23 @@ def run() -> None:
         try:
             # Poll for incoming updates (commands, payments, etc.)
             updates = update_handler.get_updates(update_offset)
+
+            # Pass 1: answer pre_checkout_query immediately (Telegram allows ~10s)
+            # This must happen before any slow work (broadcast loop, expiry sweep)
             for update in updates:
+                if "pre_checkout_query" in update:
+                    try:
+                        update_handler.handle_update(update, driver, sender)
+                    except Exception as exc:
+                        log.error("Error handling pre_checkout_query id=%s: %s", update.get("update_id"), exc)
+                        driver.rollback()
+
+            # Pass 2: handle all other updates and advance offset for all in order
+            for update in updates:
+                if "pre_checkout_query" in update:
+                    update_offset = update["update_id"] + 1
+                    driver.set_last_update_id(update_offset)
+                    continue
                 try:
                     update_handler.handle_update(update, driver, sender)
                     update_offset = update["update_id"] + 1
