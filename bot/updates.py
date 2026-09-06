@@ -108,15 +108,20 @@ Available commands:
         if data == "buy:monthly":
             payload = f"{chat_id}:monthly"
             try:
-                sender.send_invoice(
-                    chat_id,
+                link = sender.create_invoice_link(
                     "Monthly Subscription",
                     "Unlimited access to job postings for 30 days",
                     payload,
                     cfg.STARS_PRICE_MONTHLY,
                     subscription_period=2592000,
                 )
-                log.info("Sent monthly invoice to %s", chat_id)
+                sender.send_invoice_link(
+                    chat_id,
+                    "💳 Subscribe to monthly plan:",
+                    f"Pay ⭐{cfg.STARS_PRICE_MONTHLY}/month",
+                    link,
+                )
+                log.info("Sent monthly invoice link to %s", chat_id)
             except Exception as e:
                 log.error("Error sending monthly invoice to %s: %s", chat_id, e)
 
@@ -129,7 +134,6 @@ Available commands:
                     "Unlimited access to job postings for 365 days",
                     payload,
                     cfg.STARS_PRICE_YEARLY,
-                    subscription_period=None,
                 )
                 log.info("Sent yearly invoice to %s", chat_id)
             except Exception as e:

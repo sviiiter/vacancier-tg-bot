@@ -24,7 +24,25 @@ class TelegramSender:
         resp.raise_for_status()
         time.sleep(self._send_delay)
 
-    def send_invoice(self, chat_id: str, title: str, description: str, payload: str, amount_stars: int, subscription_period: int | None = None) -> None:
+    def create_invoice_link(self, title: str, description: str, payload: str, amount_stars: int, subscription_period: int | None = None) -> str:
+        url = self._api_base.format(token=self._token, method="createInvoiceLink")
+        invoice_payload = {
+            "title": title,
+            "description": description,
+            "payload": payload,
+            "currency": "XTR",
+            "prices": [{"label": title, "amount": amount_stars}],
+        }
+        if subscription_period:
+            invoice_payload["subscription_period"] = subscription_period
+        log.debug("Creating invoice link - title=%s, amount=%d", title, amount_stars)
+        resp = self._client.post(url, json=invoice_payload)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+        return resp.json()["result"]
+
+    def send_invoice(self, chat_id: str, title: str, description: str, payload: str, amount_stars: int) -> None:
         url = self._api_base.format(token=self._token, method="sendInvoice")
         invoice_payload = {
             "chat_id": chat_id,
@@ -34,13 +52,22 @@ class TelegramSender:
             "currency": "XTR",
             "prices": [{"label": title, "amount": amount_stars}],
         }
-        if subscription_period:
-            invoice_payload["subscription_period"] = subscription_period
         log.debug("Sending invoice - chat_id=%s, plan=%s, amount=%d", chat_id, title, amount_stars)
         resp = self._client.post(url, json=invoice_payload)
         if resp.status_code != 200:
             log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
         resp.raise_for_status()
+
+    def send_invoice_link(self, chat_id: str, text: str, button_text: str, url: str) -> None:
+        api_url = self._api_base.format(token=self._token, method="sendMessage")
+        keyboard = {"inline_keyboard": [[{"text": button_text, "url": url}]]}
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard}
+        log.debug("Sending invoice link - chat_id=%s, button=%s", chat_id, button_text)
+        resp = self._client.post(api_url, json=payload)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+        time.sleep(self._send_delay)
 
     def answer_pre_checkout_query(self, pre_checkout_query_id: str, ok: bool = True, error_message: str | None = None) -> None:
         url = self._api_base.format(token=self._token, method="answerPreCheckoutQuery")

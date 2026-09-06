@@ -53,20 +53,22 @@ class TestTelegramSender(unittest.TestCase):
         self.assertEqual(call_args[1]["json"]["parse_mode"], "HTML")
 
     @patch("bot.sender.httpx.Client.post")
-    def test_send_invoice_monthly(self, mock_post) -> None:
+    def test_create_invoice_link(self, mock_post) -> None:
         mock_response = Mock()
         mock_response.status_code = 200
+        mock_response.json.return_value = {"result": "https://t.me/fakebot?start=invoice123"}
         mock_post.return_value = mock_response
 
         sender = TelegramSender("fake_token", send_delay=0)
-        sender.send_invoice("123456", "Monthly", "30 days", "123456:monthly", 100, subscription_period=2592000)
+        result = sender.create_invoice_link("Monthly", "30 days", "123456:monthly", 100, subscription_period=2592000)
 
         mock_post.assert_called_once()
         call_args = mock_post.call_args
-        self.assertIn("sendInvoice", call_args[0][0])
-        self.assertEqual(call_args[1]["json"]["chat_id"], "123456")
+        self.assertIn("createInvoiceLink", call_args[0][0])
+        self.assertNotIn("chat_id", call_args[1]["json"])
         self.assertEqual(call_args[1]["json"]["currency"], "XTR")
         self.assertEqual(call_args[1]["json"]["subscription_period"], 2592000)
+        self.assertEqual(result, "https://t.me/fakebot?start=invoice123")
 
     @patch("bot.sender.httpx.Client.post")
     def test_send_invoice_yearly(self, mock_post) -> None:
@@ -75,10 +77,30 @@ class TestTelegramSender(unittest.TestCase):
         mock_post.return_value = mock_response
 
         sender = TelegramSender("fake_token", send_delay=0)
-        sender.send_invoice("123456", "Yearly", "365 days", "123456:yearly", 1000, subscription_period=None)
+        sender.send_invoice("123456", "Yearly", "365 days", "123456:yearly", 1000)
 
         call_args = mock_post.call_args
+        self.assertIn("sendInvoice", call_args[0][0])
+        self.assertEqual(call_args[1]["json"]["chat_id"], "123456")
         self.assertNotIn("subscription_period", call_args[1]["json"])
+
+    @patch("bot.sender.httpx.Client.post")
+    def test_send_invoice_link(self, mock_post) -> None:
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_post.return_value = mock_response
+
+        sender = TelegramSender("fake_token", send_delay=0)
+        sender.send_invoice_link("123456", "Subscribe now:", "Pay ⭐100/month", "https://t.me/fakebot?start=invoice123")
+
+        mock_post.assert_called_once()
+        call_args = mock_post.call_args
+        self.assertIn("sendMessage", call_args[0][0])
+        self.assertEqual(call_args[1]["json"]["chat_id"], "123456")
+        keyboard = call_args[1]["json"]["reply_markup"]["inline_keyboard"]
+        self.assertEqual(len(keyboard), 1)
+        self.assertEqual(keyboard[0][0]["text"], "Pay ⭐100/month")
+        self.assertEqual(keyboard[0][0]["url"], "https://t.me/fakebot?start=invoice123")
 
     @patch("bot.sender.httpx.Client.post")
     def test_answer_pre_checkout_query(self, mock_post) -> None:

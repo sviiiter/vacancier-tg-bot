@@ -36,12 +36,16 @@ class TestUpdateHandler(unittest.TestCase):
                 "data": "buy:monthly",
             }
         }
+        self.mock_sender.create_invoice_link.return_value = "https://t.me/$fakelink"
         self.handler.handle_update(update, self.mock_driver, self.mock_sender)
-        self.mock_sender.send_invoice.assert_called_once()
-        call_args = self.mock_sender.send_invoice.call_args
-        self.assertEqual(call_args[0][0], "123456")
-        self.assertIn("Monthly", call_args[0][1])
+        self.mock_sender.create_invoice_link.assert_called_once()
+        call_args = self.mock_sender.create_invoice_link.call_args
+        self.assertIn("Monthly", call_args[0][0])
         self.assertEqual(call_args[1]["subscription_period"], 2592000)
+        self.mock_sender.send_invoice_link.assert_called_once()
+        link_call_args = self.mock_sender.send_invoice_link.call_args
+        self.assertEqual(link_call_args[0][0], "123456")
+        self.assertEqual(link_call_args[0][3], "https://t.me/$fakelink")
 
     def test_handle_callback_query_yearly(self) -> None:
         update = {
@@ -54,7 +58,8 @@ class TestUpdateHandler(unittest.TestCase):
         self.handler.handle_update(update, self.mock_driver, self.mock_sender)
         call_args = self.mock_sender.send_invoice.call_args
         self.assertIn("Yearly", call_args[0][1])
-        self.assertIsNone(call_args[1]["subscription_period"])
+        # subscription_period parameter was removed; it should not be in the args
+        self.assertEqual(len(call_args[0]), 5)  # chat_id, title, description, payload, amount_stars
 
     def test_handle_pre_checkout_query(self) -> None:
         update = {
