@@ -151,9 +151,10 @@ Send any of these to the bot:
 
 1. User sends `/upgrade`
 2. Bot shows inline menu: "Monthly ⭐100" and "Yearly ⭐1000"
-3. User taps a button → Telegram native payment prompt
-4. User confirms payment with their Telegram Stars balance
-5. Bot receives payment webhook and activates the plan:
+3. **Monthly plan**: User taps button → Bot creates invoice link, sends message with "Pay ⭐100/month" button → User taps button → Telegram payment sheet
+4. **Yearly plan**: User taps button → Bot sends in-chat invoice directly → Telegram payment sheet
+5. User confirms payment with their Telegram Stars balance
+6. Bot receives payment webhook and activates the plan:
    - **Monthly**: Auto-renewing via Telegram (30-day cycle), user can `/cancel` to stop renewal
    - **Yearly**: One-time payment, covers 365 days, manual renewal required via `/upgrade`
 
@@ -173,9 +174,9 @@ Free subscribers start with a trial. Once expired, they stop receiving messages 
 python3 -m pytest tests/ -v
 ```
 
-Test coverage (37 tests):
-- `test_db.py`: Subscriber management, payments, trial tracking, message counting
-- `test_sender.py`: Message formatting, invoicing, pre-checkout handling, menu rendering
+Test coverage (40 tests):
+- `test_db.py`: Subscriber management, payments, trial tracking, message counting, schema migration, connection resilience
+- `test_sender.py`: Message formatting, invoicing, invoice links, pre-checkout handling, menu rendering
 - `test_updates.py`: Command parsing, payment flow, idempotency, upgrade/cancel logic
 - `test_trial.py`: Trial gating logic (message-based and time-based)
 
