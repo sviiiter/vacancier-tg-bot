@@ -4,6 +4,7 @@ import httpx
 from datetime import datetime, timedelta
 from bot.db.base import DatabaseDriver
 from bot.sender import TelegramSender
+from bot.trial import is_trial_active
 import bot.config as cfg
 
 log = logging.getLogger(__name__)
@@ -59,10 +60,11 @@ class UpdateHandler:
             log.info("Subscriber removed: chat_id=%s", chat_id)
 
         elif text == "/upgrade":
+            settings = driver.get_settings()
             reply = "💳 Choose your subscription plan:"
             buttons = [
-                (f"Monthly ⭐{cfg.STARS_PRICE_MONTHLY}", "buy:monthly"),
-                (f"Yearly ⭐{cfg.STARS_PRICE_YEARLY}", "buy:yearly"),
+                (f"Monthly ⭐{settings['stars_price_monthly']}", "buy:monthly"),
+                (f"Yearly ⭐{settings['stars_price_yearly']}", "buy:yearly"),
             ]
             try:
                 sender.send_menu(chat_id, reply, buttons)
@@ -85,6 +87,9 @@ class UpdateHandler:
                 reply = "No active subscription to cancel."
                 self._send_reply(sender, chat_id, reply)
 
+        elif text == "/plan":
+            self._handle_plan_command(chat_id, driver, sender)
+
         elif text == "/help":
             reply = """
 Available commands:
@@ -92,6 +97,7 @@ Available commands:
 /stop - Unsubscribe
 /upgrade - View subscription plans
 /cancel - Cancel auto-renewal
+/plan - View your current plan and pricing
 /help - Show this message
 """
             self._send_reply(sender, chat_id, reply)
@@ -104,6 +110,7 @@ Available commands:
         query_id = callback_query.get("id")
         chat_id = str(callback_query.get("from", {}).get("id"))
         data = callback_query.get("data", "")
+        settings = driver.get_settings()
 
         if data == "buy:monthly":
             payload = f"{chat_id}:monthly"
@@ -112,13 +119,13 @@ Available commands:
                     "Monthly Subscription",
                     "Unlimited access to job postings for 30 days",
                     payload,
-                    cfg.STARS_PRICE_MONTHLY,
+                    settings["stars_price_monthly"],
                     subscription_period=2592000,
                 )
                 sender.send_invoice_link(
                     chat_id,
                     "💳 Subscribe to monthly plan:",
-                    f"Pay ⭐{cfg.STARS_PRICE_MONTHLY}/month",
+                    f"Pay ⭐{settings['stars_price_monthly']}/month",
                     link,
                 )
                 log.info("Sent monthly invoice link to %s", chat_id)
@@ -133,7 +140,7 @@ Available commands:
                     "Yearly Subscription",
                     "Unlimited access to job postings for 365 days",
                     payload,
-                    cfg.STARS_PRICE_YEARLY,
+                    settings["stars_price_yearly"],
                 )
                 log.info("Sent yearly invoice to %s", chat_id)
             except Exception as e:
@@ -185,6 +192,59 @@ Available commands:
         reply = f"🎉 Payment successful! Your {plan} subscription is active until {expiry_date}."
         self._send_reply(sender, chat_id, reply)
         log.info("Payment processed: chat_id=%s, plan=%s, charge_id=%s", chat_id, plan, charge_id)
+
+    def _handle_plan_command(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Handle /plan command."""
+        sub = driver.get_subscriber(chat_id)
+        settings = driver.get_settings()
+        reply = self._format_plan_reply(sub, settings)
+        self._send_reply(sender, chat_id, reply)
+
+    @staticmethod
+    def _format_plan_reply(sub: dict | None, settings: dict) -> str:
+        """Format the /plan response."""
+        if sub is None:
+            reply = "📋 You're not yet subscribed!\n\n"
+            reply += f"💰 Available plans:\n"
+            reply += f"  Monthly: ⭐{settings['stars_price_monthly']} (auto-renews every 30 days)\n"
+            reply += f"  Yearly: ⭐{settings['stars_price_yearly']} (covers 365 days)\n\n"
+            reply += "Use /start to subscribe (free trial), then /upgrade to pick a paid plan."
+            return reply
+
+        reply = ""
+        if sub["plan"] == "free":
+            reply += "📋 You're on the <b>FREE</b> trial plan\n\n"
+            if settings["trial_type"] == "messages":
+                reply += f"📨 Trial progress: {sub.get('messages_received', 0)}/{settings['trial_message_limit']} messages\n"
+            else:
+                subscribed_at = sub.get("subscribed_at")
+                if isinstance(subscribed_at, str):
+                    subscribed_at = datetime.fromisoformat(subscribed_at.replace("Z", "+00:00"))
+                elapsed_days = (datetime.now(subscribed_at.tzinfo if subscribed_at.tzinfo else None) - subscribed_at).days if subscribed_at.tzinfo else (datetime.now() - subscribed_at).days
+                reply += f"📅 Trial progress: {elapsed_days}/{settings['trial_days']} days\n"
+            reply += "\n💰 Available paid plans:\n"
+            reply += f"  Monthly: ⭐{settings['stars_price_monthly']} (auto-renews every 30 days)\n"
+            reply += f"  Yearly: ⭐{settings['stars_price_yearly']} (covers 365 days)\n\n"
+            reply += "Use /upgrade to switch to a paid plan!"
+        elif sub["plan"] == "monthly":
+            reply += "📋 You're on the <b>MONTHLY</b> (auto-renewing) plan\n\n"
+            expires_at = sub.get("expires_at")
+            if expires_at:
+                if isinstance(expires_at, str):
+                    expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                reply += f"✅ Active until: {expires_at.strftime('%Y-%m-%d')}\n\n"
+            reply += "🔄 This plan auto-renews every 30 days.\n"
+            reply += "Use /cancel to stop auto-renewal (you'll keep access until expiry)."
+        elif sub["plan"] == "yearly":
+            reply += "📋 You're on the <b>YEARLY</b> plan\n\n"
+            expires_at = sub.get("expires_at")
+            if expires_at:
+                if isinstance(expires_at, str):
+                    expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                reply += f"✅ Active until: {expires_at.strftime('%Y-%m-%d')}\n\n"
+            reply += "Use /upgrade to renew when your plan expires."
+
+        return reply
 
     def _send_reply(self, sender: TelegramSender, chat_id: str, text: str) -> None:
         """Send a reply message to the user."""

@@ -58,6 +58,10 @@ class DatabaseDriver(ABC):
     def mark_trial_notice_sent(self, chat_id: str) -> None:
         """Mark trial notice as sent for a chat_id."""
 
+    @abstractmethod
+    def get_settings(self) -> dict:
+        """Return the global bot settings (pricing, trial policy)."""
+
     def rollback(self) -> None:
         """Roll back any pending transaction (default no-op)."""
         pass

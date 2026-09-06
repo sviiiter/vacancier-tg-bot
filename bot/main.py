@@ -86,6 +86,7 @@ def run() -> None:
                     log.debug("No active subscribers, skipping %d pending message(s).", len(rows))
                     driver.mark_sent([row["id"] for row in rows])
                 else:
+                    settings = driver.get_settings()
                     log.info("Broadcasting %d message(s) to %d active subscriber(s)…", len(rows), len(all_subs))
                     sent_ids: list[int] = []
                     received_by_free: list[str] = []
@@ -96,7 +97,7 @@ def run() -> None:
 
                         for sub in all_subs:
                             chat_id = sub["chat_id"]
-                            if not is_trial_active(sub, cfg.TRIAL_TYPE, cfg.TRIAL_MESSAGE_LIMIT, cfg.TRIAL_DAYS):
+                            if not is_trial_active(sub, settings["trial_type"], settings["trial_message_limit"], settings["trial_days"]):
                                 trial_locked_out.append(chat_id)
                                 continue
 
@@ -118,7 +119,7 @@ def run() -> None:
                     for sub in all_subs:
                         if (
                             sub["plan"] == "free"
-                            and not is_trial_active(sub, cfg.TRIAL_TYPE, cfg.TRIAL_MESSAGE_LIMIT, cfg.TRIAL_DAYS)
+                            and not is_trial_active(sub, settings["trial_type"], settings["trial_message_limit"], settings["trial_days"])
                             and not sub["trial_notice_sent"]
                         ):
                             try:

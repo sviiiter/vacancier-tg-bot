@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from bot.db.base import DatabaseDriver
 
@@ -146,6 +147,26 @@ class SQLiteDriver(DatabaseDriver):
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                id INTEGER PRIMARY KEY,
+                stars_price_monthly INTEGER NOT NULL DEFAULT 100,
+                stars_price_yearly INTEGER NOT NULL DEFAULT 1000,
+                trial_type TEXT NOT NULL DEFAULT 'messages',
+                trial_message_limit INTEGER NOT NULL DEFAULT 10,
+                trial_days INTEGER NOT NULL DEFAULT 2
+            )
+        """)
+        stars_price_monthly = int(os.getenv("STARS_PRICE_MONTHLY", "100"))
+        stars_price_yearly = int(os.getenv("STARS_PRICE_YEARLY", "1000"))
+        trial_type = os.getenv("TRIAL_TYPE", "messages")
+        trial_message_limit = int(os.getenv("TRIAL_MESSAGE_LIMIT", "10"))
+        trial_days = int(os.getenv("TRIAL_DAYS", "2"))
+        self._conn.execute(
+            """INSERT OR IGNORE INTO bot_settings (id, stars_price_monthly, stars_price_yearly, trial_type, trial_message_limit, trial_days)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (1, stars_price_monthly, stars_price_yearly, trial_type, trial_message_limit, trial_days),
+        )
         existing = {row[1] for row in self._conn.execute("PRAGMA table_info(subscribers)").fetchall()}
         for column, definition in [
             ("expires_at", "DATETIME"),
@@ -156,6 +177,17 @@ class SQLiteDriver(DatabaseDriver):
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE subscribers ADD COLUMN {column} {definition}")
         self._conn.commit()
+
+    def get_settings(self) -> dict:
+        cur = self._conn.execute("SELECT stars_price_monthly, stars_price_yearly, trial_type, trial_message_limit, trial_days FROM bot_settings WHERE id = 1")
+        row = cur.fetchone()
+        return dict(row) if row else {
+            "stars_price_monthly": 100,
+            "stars_price_yearly": 1000,
+            "trial_type": "messages",
+            "trial_message_limit": 10,
+            "trial_days": 2,
+        }
 
     def rollback(self) -> None:
         self._conn.rollback()

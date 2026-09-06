@@ -183,3 +183,21 @@ class TestSQLiteDriver(unittest.TestCase):
         sub = self.driver.get_subscriber("123456")
         self.assertIsNotNone(sub)
         self.assertEqual(sub["chat_id"], "123456")
+
+    def test_get_settings_defaults(self) -> None:
+        settings = self.driver.get_settings()
+        self.assertEqual(settings["stars_price_monthly"], 100)
+        self.assertEqual(settings["stars_price_yearly"], 1000)
+        self.assertEqual(settings["trial_type"], "messages")
+        self.assertEqual(settings["trial_message_limit"], 10)
+        self.assertEqual(settings["trial_days"], 2)
+
+    def test_get_settings_persists_across_restart(self) -> None:
+        self.driver._conn.execute("UPDATE bot_settings SET stars_price_monthly = 150 WHERE id = 1")
+        self.driver._conn.commit()
+        self.driver.close()
+
+        driver2 = SQLiteDriver(self.temp_file.name)
+        settings = driver2.get_settings()
+        self.assertEqual(settings["stars_price_monthly"], 150)
+        driver2.close()

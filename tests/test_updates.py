@@ -12,6 +12,13 @@ class TestUpdateHandler(unittest.TestCase):
         self.handler = UpdateHandler("fake_token", self.mock_client)
         self.mock_driver = Mock(spec=DatabaseDriver)
         self.mock_sender = Mock(spec=TelegramSender)
+        self.mock_driver.get_settings.return_value = {
+            "stars_price_monthly": 100,
+            "stars_price_yearly": 1000,
+            "trial_type": "messages",
+            "trial_message_limit": 10,
+            "trial_days": 2,
+        }
 
     def test_handle_upgrade_command(self) -> None:
         update = {
@@ -153,3 +160,60 @@ class TestUpdateHandler(unittest.TestCase):
         }
         self.handler.handle_update(update, self.mock_driver, self.mock_sender)
         self.mock_sender.cancel_star_subscription.assert_not_called()
+
+    def test_handle_plan_command_never_subscribed(self) -> None:
+        self.mock_driver.get_subscriber.return_value = None
+        update = {
+            "message": {
+                "chat": {"id": 123456},
+                "from": {"username": "testuser"},
+                "text": "/plan",
+            }
+        }
+        self.handler.handle_update(update, self.mock_driver, self.mock_sender)
+        self.mock_sender.send_message.assert_called_once()
+        call_args = self.mock_sender.send_message.call_args
+        self.assertIn("not yet subscribed", call_args[0][0])
+        self.assertIn("100", call_args[0][0])
+
+    def test_handle_plan_command_free_trial(self) -> None:
+        self.mock_driver.get_subscriber.return_value = {
+            "chat_id": "123456",
+            "plan": "free",
+            "messages_received": 5,
+            "subscribed_at": datetime.now().isoformat(),
+            "trial_notice_sent": 0,
+        }
+        update = {
+            "message": {
+                "chat": {"id": 123456},
+                "from": {"username": "testuser"},
+                "text": "/plan",
+            }
+        }
+        self.handler.handle_update(update, self.mock_driver, self.mock_sender)
+        self.mock_sender.send_message.assert_called_once()
+        call_args = self.mock_sender.send_message.call_args
+        self.assertIn("FREE", call_args[0][0])
+        self.assertIn("5/10", call_args[0][0])
+
+    def test_handle_plan_command_paid_monthly(self) -> None:
+        expires_at = (datetime.now() + timedelta(days=20)).isoformat()
+        self.mock_driver.get_subscriber.return_value = {
+            "chat_id": "123456",
+            "plan": "monthly",
+            "expires_at": expires_at,
+            "star_charge_id": "charge_123",
+        }
+        update = {
+            "message": {
+                "chat": {"id": 123456},
+                "from": {"username": "testuser"},
+                "text": "/plan",
+            }
+        }
+        self.handler.handle_update(update, self.mock_driver, self.mock_sender)
+        self.mock_sender.send_message.assert_called_once()
+        call_args = self.mock_sender.send_message.call_args
+        self.assertIn("MONTHLY", call_args[0][0])
+        self.assertIn("auto-renew", call_args[0][0])
