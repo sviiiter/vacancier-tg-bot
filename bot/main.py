@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 def run() -> None:
     driver = get_driver(cfg.DB_DRIVER, cfg.DB_DSN)
     sender = TelegramSender(cfg.BOT_TOKEN, cfg.SEND_DELAY_SEC)
-    client = httpx.Client(timeout=15)
+    client = httpx.Client(timeout=40)
     update_handler = UpdateHandler(cfg.BOT_TOKEN, client)
 
     def shutdown(sig, frame):
