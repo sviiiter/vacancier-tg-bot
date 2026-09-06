@@ -179,7 +179,22 @@ class MySQLDriver(DatabaseDriver):
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            for column, definition in [
+                ("expires_at", "DATETIME"),
+                ("star_charge_id", "VARCHAR(255)"),
+                ("messages_received", "INT NOT NULL DEFAULT 0"),
+                ("trial_notice_sent", "INT NOT NULL DEFAULT 0"),
+            ]:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'subscribers' AND column_name = %s",
+                    (column,),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(f"ALTER TABLE subscribers ADD COLUMN `{column}` {definition}")
         self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
 
     def close(self) -> None:
         self._conn.close()

@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 import os
+import sqlite3
 from datetime import datetime, timedelta
 from bot.db.sqlite import SQLiteDriver
 
@@ -123,3 +124,62 @@ class TestSQLiteDriver(unittest.TestCase):
         self.driver.mark_trial_notice_sent("123456")
         sub = self.driver.get_subscriber("123456")
         self.assertEqual(sub["trial_notice_sent"], 1)
+
+    def test_migration_adds_columns_to_legacy_table(self) -> None:
+        legacy_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        legacy_db.close()
+        try:
+            legacy_conn = sqlite3.connect(legacy_db.name)
+            legacy_conn.execute("""
+                CREATE TABLE subscribers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL UNIQUE,
+                    username TEXT,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    plan TEXT NOT NULL DEFAULT 'free',
+                    subscribed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            legacy_conn.execute(
+                "INSERT INTO subscribers (chat_id, username, active) VALUES (?, ?, ?)",
+                ("123456", "olduser", 1),
+            )
+            legacy_conn.commit()
+            legacy_conn.close()
+
+            driver = SQLiteDriver(legacy_db.name)
+
+            col_names = {row[1] for row in driver._conn.execute("PRAGMA table_info(subscribers)").fetchall()}
+            self.assertIn("expires_at", col_names)
+            self.assertIn("star_charge_id", col_names)
+            self.assertIn("messages_received", col_names)
+            self.assertIn("trial_notice_sent", col_names)
+
+            sub = driver.get_subscriber("123456")
+            self.assertIsNotNone(sub)
+            self.assertEqual(sub["chat_id"], "123456")
+            self.assertEqual(sub["username"], "olduser")
+            self.assertEqual(sub["active"], 1)
+            self.assertEqual(sub["plan"], "free")
+            self.assertEqual(sub["messages_received"], 0)
+            self.assertEqual(sub["trial_notice_sent"], 0)
+            self.assertIsNone(sub["expires_at"])
+            self.assertIsNone(sub["star_charge_id"])
+
+            driver.close()
+        finally:
+            os.unlink(legacy_db.name)
+
+    def test_rollback_after_failed_statement(self) -> None:
+        self.driver.add_subscriber("123456", "testuser")
+
+        try:
+            self.driver._conn.execute("SELECT * FROM nonexistent_table")
+        except Exception:
+            pass
+
+        self.driver.rollback()
+
+        sub = self.driver.get_subscriber("123456")
+        self.assertIsNotNone(sub)
+        self.assertEqual(sub["chat_id"], "123456")

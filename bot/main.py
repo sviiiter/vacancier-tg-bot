@@ -51,6 +51,7 @@ def run() -> None:
                     driver.set_last_update_id(update_offset)
                 except Exception as exc:
                     log.error("Error handling update id=%s: %s", update.get("update_id"), exc)
+                    driver.rollback()
 
             # Downgrade expired subscribers
             expired = driver.downgrade_expired_subscribers()
@@ -121,6 +122,7 @@ def run() -> None:
                 log.debug("No pending messages.")
         except Exception as exc:
             log.error("Loop error: %s", exc)
+            driver.rollback()
 
         time.sleep(cfg.POLL_INTERVAL_SEC)
 

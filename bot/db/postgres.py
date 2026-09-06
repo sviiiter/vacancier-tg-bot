@@ -161,7 +161,22 @@ class PostgresDriver(DatabaseDriver):
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
             """)
+            for column, definition in [
+                ("expires_at", "TIMESTAMPTZ"),
+                ("star_charge_id", "TEXT"),
+                ("messages_received", "INTEGER NOT NULL DEFAULT 0"),
+                ("trial_notice_sent", "INTEGER NOT NULL DEFAULT 0"),
+            ]:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name = 'subscribers' AND column_name = %s",
+                    (column,),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(f'ALTER TABLE subscribers ADD COLUMN "{column}" {definition}')
         self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
 
     def close(self) -> None:
         self._conn.close()

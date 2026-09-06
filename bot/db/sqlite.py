@@ -146,7 +146,19 @@ class SQLiteDriver(DatabaseDriver):
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(subscribers)").fetchall()}
+        for column, definition in [
+            ("expires_at", "DATETIME"),
+            ("star_charge_id", "TEXT"),
+            ("messages_received", "INTEGER NOT NULL DEFAULT 0"),
+            ("trial_notice_sent", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE subscribers ADD COLUMN {column} {definition}")
         self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
 
     def close(self) -> None:
         self._conn.close()

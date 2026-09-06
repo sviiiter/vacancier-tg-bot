@@ -58,5 +58,9 @@ class DatabaseDriver(ABC):
     def mark_trial_notice_sent(self, chat_id: str) -> None:
         """Mark trial notice as sent for a chat_id."""
 
+    def rollback(self) -> None:
+        """Roll back any pending transaction (default no-op)."""
+        pass
+
     def close(self) -> None:
         pass
