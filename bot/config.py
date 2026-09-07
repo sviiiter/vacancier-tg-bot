@@ -15,6 +15,7 @@ BOT_TOKEN: str = _require("BOT_TOKEN")
 CHAT_ID: str | None = os.getenv("CHAT_ID")  # Optional: only used for backwards-compat single-recipient mode
 DB_DRIVER: str = os.getenv("DB_DRIVER", "sqlite")
 DB_DSN: str = _require("DB_DSN")
+REDIS_URL: str = _require("REDIS_URL")
 BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "10"))
 POLL_INTERVAL_SEC: int = int(os.getenv("POLL_INTERVAL_SEC", "10"))
 SEND_DELAY_SEC: float = float(os.getenv("SEND_DELAY_SEC", "0.5"))

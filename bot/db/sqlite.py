@@ -9,18 +9,18 @@ class SQLiteDriver(DatabaseDriver):
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
 
-    def get_pending(self, limit: int) -> list[dict]:
+    def get_messages_by_ids(self, ids: list[int]) -> list[dict]:
+        placeholders = ",".join("?" * len(ids))
         cur = self._conn.execute(
-            "SELECT * FROM messages WHERE queue_sent = 0 AND read = 0 LIMIT ?",
-            (limit,),
+            f"SELECT * FROM messages WHERE id IN ({placeholders}) ORDER BY created_date ASC",
+            ids,
         )
         return [dict(row) for row in cur.fetchall()]
 
-    def mark_sent(self, ids: list[int]) -> None:
-        placeholders = ",".join("?" * len(ids))
+    def update_message_sent_last_date(self, chat_id: str, ts) -> None:
         self._conn.execute(
-            f"UPDATE messages SET queue_sent = 1 WHERE id IN ({placeholders})",
-            ids,
+            "UPDATE subscribers SET message_sent_last_date = ? WHERE chat_id = ? AND (message_sent_last_date IS NULL OR message_sent_last_date < ?)",
+            (ts, chat_id, ts),
         )
         self._conn.commit()
 
@@ -90,12 +90,6 @@ class SQLiteDriver(DatabaseDriver):
         expired = [row[0] for row in cur.fetchall()]
         self._conn.commit()
         return expired
-
-    def list_broadcastable_subscribers(self) -> list[dict]:
-        cur = self._conn.execute(
-            "SELECT chat_id, plan, messages_received, subscribed_at, trial_notice_sent FROM subscribers WHERE active = 1"
-        )
-        return [dict(row) for row in cur.fetchall()]
 
     def increment_messages_received(self, chat_ids: list[str]) -> None:
         if not chat_ids:
@@ -173,9 +167,25 @@ class SQLiteDriver(DatabaseDriver):
             ("star_charge_id", "TEXT"),
             ("messages_received", "INTEGER NOT NULL DEFAULT 0"),
             ("trial_notice_sent", "INTEGER NOT NULL DEFAULT 0"),
+            ("message_sent_last_date", "DATETIME"),
         ]:
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE subscribers ADD COLUMN {column} {definition}")
+
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscriber_filters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscriber_id INTEGER NOT NULL,
+                filter_id INTEGER NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (subscriber_id, filter_id),
+                FOREIGN KEY (subscriber_id) REFERENCES subscribers(id) ON DELETE CASCADE
+            )
+        """)
+
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_subscriber_filters_subscriber_id ON subscriber_filters(subscriber_id)
+        """)
         self._conn.commit()
 
     def get_settings(self) -> dict:
@@ -188,6 +198,27 @@ class SQLiteDriver(DatabaseDriver):
             "trial_message_limit": 10,
             "trial_days": 2,
         }
+
+    def get_subscriber_filters(self, chat_id: str) -> list[dict]:
+        with self._conn.cursor() as cur:
+            cur.execute("""
+                SELECT f.id, f.name, f.type, f.extra
+                FROM filters f
+                JOIN subscriber_filters sf ON f.id = sf.filter_id
+                JOIN subscribers s ON sf.subscriber_id = s.id
+                WHERE s.chat_id = ?
+                ORDER BY f.created_at DESC
+            """, (chat_id,))
+            columns = [desc[0] for desc in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def update_message_sent_date(self, chat_id: str) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET message_sent_last_date = datetime('now') WHERE chat_id = ?",
+                (chat_id,),
+            )
+        self._conn.commit()
 
     def rollback(self) -> None:
         self._conn.rollback()

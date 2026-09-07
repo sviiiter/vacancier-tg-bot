@@ -1,6 +1,7 @@
 import json
 import logging
 import httpx
+import redis
 from datetime import datetime, timedelta
 from bot.db.base import DatabaseDriver
 from bot.sender import TelegramSender
@@ -13,9 +14,10 @@ log = logging.getLogger(__name__)
 class UpdateHandler:
     _api_base = "https://api.telegram.org/bot{token}/{method}"
 
-    def __init__(self, token: str, client: httpx.Client) -> None:
+    def __init__(self, token: str, client: httpx.Client, redis_client: redis.Redis = None) -> None:
         self._token = token
         self._client = client
+        self._redis = redis_client
 
     def get_updates(self, offset: int, timeout: int = 30) -> list[dict]:
         """Poll Telegram getUpdates endpoint."""
@@ -90,14 +92,26 @@ class UpdateHandler:
         elif text == "/plan":
             self._handle_plan_command(chat_id, driver, sender)
 
+        elif text == "/filters":
+            self._handle_filters_command(chat_id, driver, sender)
+
+        elif text == "/add_filter":
+            reply = "Filter management coming soon!\nPlease contact support to add filters."
+            self._send_reply(sender, chat_id, reply)
+
+        elif text == "/updates":
+            self._handle_updates_command(chat_id, driver, sender)
+
         elif text == "/help":
             reply = """
 Available commands:
 /start - Subscribe to job postings
 /stop - Unsubscribe
+/plan - View your current plan and pricing
+/filters - List your keyword filters
+/updates - Get latest matching job postings
 /upgrade - View subscription plans
 /cancel - Cancel auto-renewal
-/plan - View your current plan and pricing
 /help - Show this message
 """
             self._send_reply(sender, chat_id, reply)
@@ -245,6 +259,89 @@ Available commands:
             reply += "Use /upgrade to renew when your plan expires."
 
         return reply
+
+    def _handle_filters_command(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Handle /filters command - list user's filters."""
+        sub = driver.get_subscriber(chat_id)
+        if not sub or not sub.get("active"):
+            reply = "You must be subscribed to manage filters."
+            self._send_reply(sender, chat_id, reply)
+            return
+
+        try:
+            filters = driver.get_subscriber_filters(chat_id)
+            if not filters:
+                reply = "You have no filters configured yet.\nUse /add_filter to create one."
+                self._send_reply(sender, chat_id, reply)
+                return
+
+            reply = "📋 Your filters:\n\n"
+            for f in filters:
+                filter_type = f.get("type", "unknown")
+                name = f.get("name", "Unnamed")
+                if filter_type == "json":
+                    keywords = f.get("extra", "")
+                    reply += f"#{f['id']} {name}: {keywords}\n"
+                else:
+                    reply += f"#{f['id']} {name} (OpenAI)\n"
+
+            self._send_reply(sender, chat_id, reply)
+            log.info("Sent filters to %s", chat_id)
+        except Exception as e:
+            log.error("Error fetching filters for %s: %s", chat_id, e)
+            reply = "Error loading filters. Please try again."
+            self._send_reply(sender, chat_id, reply)
+
+    def _handle_updates_command(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Handle /updates command - get pending messages from Redis."""
+        sub = driver.get_subscriber(chat_id)
+        if not sub or not sub.get("active"):
+            reply = "You must be subscribed to receive updates."
+            self._send_reply(sender, chat_id, reply)
+            return
+
+        if not self._redis:
+            reply = "Updates service is temporarily unavailable."
+            self._send_reply(sender, chat_id, reply)
+            log.warning("Redis client not available for /updates command")
+            return
+
+        try:
+            # Get pending message IDs from Redis
+            key = f"pending:{chat_id}"
+            message_ids = self._redis.smembers(key)
+
+            if not message_ids:
+                reply = "No new updates available at this time."
+                self._send_reply(sender, chat_id, reply)
+                return
+
+            # Fetch messages from database
+            message_ids_list = [int(m) for m in message_ids]
+            messages = driver.get_messages_by_ids(message_ids_list)
+
+            if not messages:
+                reply = "No updates available."
+                self._send_reply(sender, chat_id, reply)
+                return
+
+            reply = f"📋 Latest job updates ({len(messages)} new):\n\n"
+            for msg in messages[:10]:  # Limit to 10 messages
+                desc = msg.get("description", "")[:80].strip()
+                link = msg.get("tg_message_link", "")
+                reply += f"🔗 {link}\n{desc}...\n\n"
+
+            self._send_reply(sender, chat_id, reply)
+
+            # Clear pending messages and update last_sent_date
+            self._redis.delete(key)
+            driver.update_message_sent_date(chat_id)
+
+            log.info("Sent %d updates to %s", len(messages), chat_id)
+        except Exception as e:
+            log.error("Error handling /updates for %s: %s", chat_id, e)
+            reply = "Error loading updates. Please try again."
+            self._send_reply(sender, chat_id, reply)
 
     def _send_reply(self, sender: TelegramSender, chat_id: str, text: str) -> None:
         """Send a reply message to the user."""

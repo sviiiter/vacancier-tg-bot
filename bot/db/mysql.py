@@ -19,20 +19,20 @@ class MySQLDriver(DatabaseDriver):
         )
         self._init_schema()
 
-    def get_pending(self, limit: int) -> list[dict]:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                "SELECT * FROM messages WHERE queue_sent = 0 AND `read` = 0 LIMIT %s",
-                (limit,),
-            )
-            return cur.fetchall()
-
-    def mark_sent(self, ids: list[int]) -> None:
+    def get_messages_by_ids(self, ids: list[int]) -> list[dict]:
         placeholders = ",".join(["%s"] * len(ids))
         with self._conn.cursor() as cur:
             cur.execute(
-                f"UPDATE messages SET queue_sent = 1 WHERE id IN ({placeholders})",
+                f"SELECT * FROM messages WHERE id IN ({placeholders}) ORDER BY created_date ASC",
                 ids,
+            )
+            return cur.fetchall()
+
+    def update_message_sent_last_date(self, chat_id: str, ts) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET message_sent_last_date = %s WHERE chat_id = %s AND (message_sent_last_date IS NULL OR message_sent_last_date < %s)",
+                (ts, chat_id, ts),
             )
         self._conn.commit()
 
@@ -120,13 +120,6 @@ class MySQLDriver(DatabaseDriver):
         self._conn.commit()
         return expired
 
-    def list_broadcastable_subscribers(self) -> list[dict]:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                "SELECT chat_id, plan, messages_received, subscribed_at, trial_notice_sent FROM subscribers WHERE active = 1"
-            )
-            return cur.fetchall()
-
     def increment_messages_received(self, chat_ids: list[str]) -> None:
         if not chat_ids:
             return
@@ -205,6 +198,7 @@ class MySQLDriver(DatabaseDriver):
                 ("star_charge_id", "VARCHAR(255)"),
                 ("messages_received", "INT NOT NULL DEFAULT 0"),
                 ("trial_notice_sent", "INT NOT NULL DEFAULT 0"),
+                ("message_sent_last_date", "DATETIME"),
             ]:
                 cur.execute(
                     "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'subscribers' AND column_name = %s",
@@ -212,6 +206,21 @@ class MySQLDriver(DatabaseDriver):
                 )
                 if cur.fetchone() is None:
                     cur.execute(f"ALTER TABLE subscribers ADD COLUMN `{column}` {definition}")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS subscriber_filters (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    subscriber_id INT NOT NULL,
+                    filter_id INT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (subscriber_id, filter_id),
+                    FOREIGN KEY (subscriber_id) REFERENCES subscribers(id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subscriber_filters_subscriber_id ON subscriber_filters(subscriber_id)
+            """)
         self._conn.commit()
 
     def get_settings(self) -> dict:
@@ -225,6 +234,27 @@ class MySQLDriver(DatabaseDriver):
             "trial_message_limit": 10,
             "trial_days": 2,
         }
+
+    def get_subscriber_filters(self, chat_id: str) -> list[dict]:
+        with self._conn.cursor() as cur:
+            cur.execute("""
+                SELECT f.id, f.name, f.type, f.extra
+                FROM filters f
+                JOIN subscriber_filters sf ON f.id = sf.filter_id
+                JOIN subscribers s ON sf.subscriber_id = s.id
+                WHERE s.chat_id = %s
+                ORDER BY f.created_at DESC
+            """, (chat_id,))
+            columns = [desc[0] for desc in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def update_message_sent_date(self, chat_id: str) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET message_sent_last_date = NOW() WHERE chat_id = %s",
+                (chat_id,),
+            )
+        self._conn.commit()
 
     def rollback(self) -> None:
         self._conn.rollback()

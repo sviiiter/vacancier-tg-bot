@@ -10,19 +10,19 @@ class PostgresDriver(DatabaseDriver):
         self._conn.autocommit = False
         self._init_schema()
 
-    def get_pending(self, limit: int) -> list[dict]:
+    def get_messages_by_ids(self, ids: list[int]) -> list[dict]:
         with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM messages WHERE queue_sent = 0 AND read = 0 LIMIT %s",
-                (limit,),
+                "SELECT * FROM messages WHERE id = ANY(%s) ORDER BY created_date ASC",
+                (ids,),
             )
             return [dict(row) for row in cur.fetchall()]
 
-    def mark_sent(self, ids: list[int]) -> None:
+    def update_message_sent_last_date(self, chat_id: str, ts) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
-                "UPDATE messages SET queue_sent = 1 WHERE id = ANY(%s)",
-                (ids,),
+                "UPDATE subscribers SET message_sent_last_date = %s WHERE chat_id = %s AND (message_sent_last_date IS NULL OR message_sent_last_date < %s)",
+                (ts, chat_id, ts),
             )
         self._conn.commit()
 
@@ -103,13 +103,6 @@ class PostgresDriver(DatabaseDriver):
         self._conn.commit()
         return expired
 
-    def list_broadcastable_subscribers(self) -> list[dict]:
-        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                "SELECT chat_id, plan, messages_received, subscribed_at, trial_notice_sent FROM subscribers WHERE active = 1"
-            )
-            return [dict(row) for row in cur.fetchall()]
-
     def increment_messages_received(self, chat_ids: list[str]) -> None:
         if not chat_ids:
             return
@@ -188,6 +181,7 @@ class PostgresDriver(DatabaseDriver):
                 ("star_charge_id", "TEXT"),
                 ("messages_received", "INTEGER NOT NULL DEFAULT 0"),
                 ("trial_notice_sent", "INTEGER NOT NULL DEFAULT 0"),
+                ("message_sent_last_date", "TIMESTAMPTZ"),
             ]:
                 cur.execute(
                     "SELECT 1 FROM information_schema.columns WHERE table_name = 'subscribers' AND column_name = %s",
@@ -195,6 +189,20 @@ class PostgresDriver(DatabaseDriver):
                 )
                 if cur.fetchone() is None:
                     cur.execute(f'ALTER TABLE subscribers ADD COLUMN "{column}" {definition}')
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS subscriber_filters (
+                    id            SERIAL PRIMARY KEY,
+                    subscriber_id INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE,
+                    filter_id     INTEGER NOT NULL,
+                    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (subscriber_id, filter_id)
+                )
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subscriber_filters_subscriber_id ON subscriber_filters(subscriber_id)
+            """)
         self._conn.commit()
 
     def get_settings(self) -> dict:
@@ -208,6 +216,26 @@ class PostgresDriver(DatabaseDriver):
             "trial_message_limit": 10,
             "trial_days": 2,
         }
+
+    def get_subscriber_filters(self, chat_id: str) -> list[dict]:
+        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT f.id, f.name, f.type, f.extra
+                FROM filters f
+                JOIN subscriber_filters sf ON f.id = sf.filter_id
+                JOIN subscribers s ON sf.subscriber_id = s.id
+                WHERE s.chat_id = %s
+                ORDER BY f.created_at DESC
+            """, (chat_id,))
+            return [dict(row) for row in cur.fetchall()]
+
+    def update_message_sent_date(self, chat_id: str) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET message_sent_last_date = now() WHERE chat_id = %s",
+                (chat_id,),
+            )
+        self._conn.commit()
 
     def rollback(self) -> None:
         self._conn.rollback()

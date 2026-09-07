@@ -89,20 +89,6 @@ class TestSQLiteDriver(unittest.TestCase):
         sub2 = self.driver.get_subscriber("222222")
         self.assertEqual(sub2["plan"], "monthly")
 
-    def test_list_broadcastable_subscribers(self) -> None:
-        self.driver.add_subscriber("111111", "user1")
-        self.driver.add_subscriber("222222", "user2")
-        self.driver.add_subscriber("333333", "user3")
-        subs = self.driver.list_broadcastable_subscribers()
-        self.assertEqual(len(subs), 3)
-        chat_ids = [sub["chat_id"] for sub in subs]
-        self.assertIn("111111", chat_ids)
-        self.assertIn("222222", chat_ids)
-        self.assertIn("333333", chat_ids)
-        for sub in subs:
-            self.assertEqual(sub["plan"], "free")
-            self.assertEqual(sub["messages_received"], 0)
-
     def test_increment_messages_received(self) -> None:
         self.driver.add_subscriber("111111", "user1")
         self.driver.add_subscriber("222222", "user2")
@@ -154,6 +140,7 @@ class TestSQLiteDriver(unittest.TestCase):
             self.assertIn("star_charge_id", col_names)
             self.assertIn("messages_received", col_names)
             self.assertIn("trial_notice_sent", col_names)
+            self.assertIn("message_sent_last_date", col_names)
 
             sub = driver.get_subscriber("123456")
             self.assertIsNotNone(sub)

@@ -3,14 +3,6 @@ from abc import ABC, abstractmethod
 
 class DatabaseDriver(ABC):
     @abstractmethod
-    def get_pending(self, limit: int) -> list[dict]:
-        """Return up to `limit` messages where queue_sent=0 and read=0."""
-
-    @abstractmethod
-    def mark_sent(self, ids: list[int]) -> None:
-        """Set queue_sent=1 for the given message IDs."""
-
-    @abstractmethod
     def add_subscriber(self, chat_id: str, username: str | None = None) -> None:
         """Add or reactivate a subscriber."""
 
@@ -47,8 +39,12 @@ class DatabaseDriver(ABC):
         """Downgrade expired subscribers to 'free' plan, return affected chat_ids."""
 
     @abstractmethod
-    def list_broadcastable_subscribers(self) -> list[dict]:
-        """List active subscribers with full row data for trial gating."""
+    def get_messages_by_ids(self, ids: list[int]) -> list[dict]:
+        """Fetch messages by IDs, ordered by created_date ASC."""
+
+    @abstractmethod
+    def update_message_sent_last_date(self, chat_id: str, ts) -> None:
+        """Update message_sent_last_date for a subscriber, only if the new date is newer."""
 
     @abstractmethod
     def increment_messages_received(self, chat_ids: list[str]) -> None:
@@ -61,6 +57,14 @@ class DatabaseDriver(ABC):
     @abstractmethod
     def get_settings(self) -> dict:
         """Return the global bot settings (pricing, trial policy)."""
+
+    @abstractmethod
+    def get_subscriber_filters(self, chat_id: str) -> list[dict]:
+        """Get all filters subscribed to by a subscriber."""
+
+    @abstractmethod
+    def update_message_sent_date(self, chat_id: str) -> None:
+        """Update message_sent_last_date to now for a subscriber."""
 
     def rollback(self) -> None:
         """Roll back any pending transaction (default no-op)."""
