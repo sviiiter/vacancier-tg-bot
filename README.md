@@ -6,24 +6,65 @@ A multi-user Telegram bot that broadcasts job vacancy postings to subscribers. U
 
 - **Multi-user subscriptions**: Users `/subscribe` via Telegram to receive job postings; `/unsubscribe` to stop
 - **Free trial period**: New subscribers get 10 free messages (configurable, can switch to time-based)
+- **Trial quota enforcement**: Only sends up to remaining quota per delivery pass; respects both message-count and time-based trials
 - **Paid subscriptions**: Monthly or yearly plans via Telegram Stars (XTR) — native, no external payment provider
 - **Trial gating**: Pure function-based, switchable between message-count or time-interval limits via env var
-- **Command-based management**: `/start`, `/subscribe`, `/stop`, `/unsubscribe`, `/upgrade`, `/cancel`, `/help`
+- **Command-based management**: `/start`, `/subscribe`, `/stop`, `/unsubscribe`, `/upgrade`, `/cancel`, `/help`, `/filters`, `/updates`
+- **Filter management**: Subscribers can create custom job filters (keyword-based or AI-based)
 - **Payment tracking**: Audit log of all payments with idempotency guard (no double-charging on webhook replays)
 - **Subscription expiry**: Automatic downgrade to free on expiry; auto-renewal for monthly plans (Telegram-native)
 - **Multi-database support**: PostgreSQL, SQLite, MySQL
 - **Persistent state**: Remembers Telegram update offset across restarts (no message duplication or missed commands)
 - **Graceful shutdown**: Handles SIGINT/SIGTERM signals cleanly
-- **Partial delivery tolerance**: Marks message sent if delivered to *any* active subscriber (not all-or-nothing)
+- **Clean unsubscribe**: Clears pending messages from Redis cache, so resubscribing starts fresh with a new trial quota
 
 ## Architecture
 
-The bot runs two parallel loops:
+The bot runs two parallel loops in `bot/main.py`:
 
-1. **Update polling**: Listens for incoming Telegram commands (`/subscribe`, `/unsubscribe`, `/help`)
-2. **Message broadcasting**: Fetches pending job messages and sends them to all active subscribers
+1. **Update polling**: Listens for incoming Telegram commands (`/subscribe`, `/unsubscribe`, `/upgrade`, `/filters`, `/updates`)
+2. **Message delivery**: Fetches pending messages from Redis and sends to active subscribers, respecting trial quotas
 
-Each message is marked `queue_sent=1` only after being delivered to at least one active subscriber (graceful partial failure: if 3 of 4 subscribers fail, the message is still marked sent if it reached 1+).
+### Message Flow
+
+```
+Parser (vacancier-parser-v2)
+    ↓ (fetch, deduplicate, save messages)
+    
+Database: messages table
+    ↓
+    
+Matcher (vacancier-parser-v2/matcher.py)
+    ↓ (match messages against subscriber filters)
+    
+Redis: pending:{chat_id} sets
+    ↓ (messages staged, not yet delivered)
+    
+Bot Delivery Loop (bot/main.py)
+    ↓ (check: is subscriber active? in trial? enough quota?)
+    ↓ (cap delivery: max = remaining_quota for free subscribers)
+    
+Telegram: messages sent
+    ↓ (only here do we update messages_received counter)
+    
+Database: subscribers table (messages_received, message_sent_last_date)
+```
+
+### Trial Quota Enforcement
+
+For **free subscribers on message-based trial**:
+- Quota limit = `TRIAL_MESSAGE_LIMIT` (default 10)
+- Remaining = limit − `messages_received`
+- Delivery loop sends **only** up to remaining quota, leaving excess messages in Redis for later
+- Counters update **only after confirmed Telegram delivery** (not at staging time)
+
+For **free subscribers on time-based trial** or **paid subscribers**:
+- No message-count limit, send all pending messages
+
+This ensures:
+1. Users can resubscribe and get a fresh trial quota
+2. Undelivered messages don't count toward quota
+3. Failed deliveries don't double-count
 
 ## Installation
 
@@ -82,7 +123,8 @@ Stores user subscriptions and payment state.
 | `subscribed_at` | TIMESTAMP | Now | Time of subscription (trial start for time-based trials) |
 | `expires_at` | TIMESTAMP | NULL | When paid subscription expires (NULL for free) |
 | `star_charge_id` | TEXT | NULL | Telegram payment charge ID for recurring subscription cancellation |
-| `messages_received` | INT | `0` | Count of messages delivered while on free trial |
+| `messages_received` | INT | `0` | Count of messages delivered while on free trial (reset to 0 on resubscribe) |
+| `message_sent_last_date` | TIMESTAMP | NULL | created_date of last message sent to this subscriber |
 | `trial_notice_sent` | INT | `0` | Guard flag: `1` = trial-ended notice already sent |
 
 ### `messages`
@@ -100,6 +142,28 @@ Job vacancy messages from the parser.
 | `read` | INT | Read status |
 | `matched_keywords` | JSONB | Array of matching keyword groups |
 
+### `filters`
+Subscriber-defined filters for receiving only relevant job postings.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INT PRIMARY KEY | |
+| `subscriber_id` | INT | References subscribers(id) |
+| `name` | VARCHAR(255) | Filter name (e.g., "Python Backend") |
+| `type` | VARCHAR(10) | `'json'` or `'file'` |
+| `extra` | TEXT | Filter config (JSON rules or file path) |
+| `created_at` | TIMESTAMP | When filter was created |
+
+### `subscriber_filters`
+Junction table: which filters does each subscriber have?
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INT PRIMARY KEY | |
+| `subscriber_id` | INT | References subscribers(id) |
+| `filter_id` | INT | References filters(id) |
+| `created_at` | TIMESTAMP | When filter was added to subscriber |
+
 ### `bot_state`
 Persistent state for the bot.
 
@@ -107,6 +171,18 @@ Persistent state for the bot.
 |--------|------|-------|
 | `key` | TEXT PRIMARY KEY | State key (e.g., `'last_update_id'`) |
 | `value` | TEXT | State value |
+
+### `bot_settings`
+Trial configuration and pricing settings.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INT PRIMARY KEY | Always 1 (singleton) |
+| `stars_price_monthly` | INT | Price in Telegram Stars for monthly subscription |
+| `stars_price_yearly` | INT | Price in Telegram Stars for yearly subscription |
+| `trial_type` | TEXT | `'messages'` (count-based) or `'days'` (time-based) |
+| `trial_message_limit` | INT | Max free messages (if `trial_type='messages'`) |
+| `trial_days` | INT | Free trial duration in days (if `trial_type='days'`) |
 
 ### `payments`
 Audit log of all payments (for idempotency and accounting).
@@ -141,10 +217,12 @@ Send any of these to the bot:
 
 - `/start` — Subscribe to job postings (free, trial period applies)
 - `/subscribe` — Alias for `/start`
-- `/stop` — Unsubscribe
+- `/stop` — Unsubscribe and clear pending messages (fresh quota on next `/subscribe`)
 - `/unsubscribe` — Alias for `/stop`
 - `/upgrade` — View subscription plans (Monthly ⭐100 / Yearly ⭐1000) and purchase via Telegram Stars
 - `/cancel` — Cancel auto-renewal of monthly subscription (access continues until expiry)
+- `/filters` — List your configured message filters (if any)
+- `/updates` — Manually fetch and view pending job messages from cache
 - `/help` — Show available commands
 
 #### Payment Flow
@@ -219,6 +297,12 @@ tests/
 - Delete the `bot_state` row where `key='last_update_id'` to reset
 - Bot persists offset to prevent re-handling commands after restart
 
+### Subscriber unsubscribed then resubscribed, but still got old messages
+- `/stop` now clears the Redis cache (`pending:{chat_id}`) — old messages should not appear on resubscribe
+- Check Redis: `redis-cli SMEMBERS pending:{chat_id}` should be empty after `/stop`
+- If not empty: redis may not be connected during unsubscribe; restart the bot to reconnect
+- On resubscribe (`/subscribe`), `messages_received` is reset to 0, giving a fresh trial quota
+
 ### "No active subscribers" but messages are marked sent
 - By design: bot marks message sent if delivered to any subscriber
 - If all subscriber sends fail, message is still counted as sent (to avoid retries)
@@ -227,6 +311,12 @@ tests/
 - Check `TRIAL_TYPE` and limits: `TRIAL_TYPE=messages` with `TRIAL_MESSAGE_LIMIT=10` means 10 free messages
 - Verify `subscribers.messages_received >= 10` and `trial_notice_sent=1` in database
 - Trial gating is independent of plan: even `plan='free'` subscribers can receive messages while `is_trial_active()` returns `True`
+- The delivery loop caps messages per pass: if subscriber has 3/10 quota used, only 7 more messages are sent this pass
+
+### Subscriber received more messages than quota allows
+- This should not happen (bot caps delivery to remaining quota)
+- If it does: check that the matcher repo's `cache/publisher.py` is not updating `messages_received` (removed in recent refactor)
+- Only `bot/main.py` should update `messages_received` after actual delivery
 
 ### Subscriber stopped receiving after their subscription expired
 - Check `subscribers.plan` (should be downgraded to `'free'` by the expiry sweep)
