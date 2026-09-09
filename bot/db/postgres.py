@@ -31,7 +31,7 @@ class PostgresDriver(DatabaseDriver):
             cur.execute(
                 """INSERT INTO subscribers (chat_id, username, active, messages_received, message_sent_last_date)
                    VALUES (%s, %s, 1, 0, NULL)
-                   ON CONFLICT (chat_id) DO UPDATE SET active = 1, messages_received = 0, message_sent_last_date = NULL""",
+                   ON CONFLICT (chat_id) DO UPDATE SET active = 1, username = EXCLUDED.username""",
                 (chat_id, username),
             )
         self._conn.commit()
