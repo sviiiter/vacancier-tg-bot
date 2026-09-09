@@ -29,9 +29,9 @@ class PostgresDriver(DatabaseDriver):
     def add_subscriber(self, chat_id: str, username: str | None = None) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO subscribers (chat_id, username, active)
-                   VALUES (%s, %s, 1)
-                   ON CONFLICT (chat_id) DO UPDATE SET active = 1""",
+                """INSERT INTO subscribers (chat_id, username, active, messages_received, message_sent_last_date)
+                   VALUES (%s, %s, 1, 0, NULL)
+                   ON CONFLICT (chat_id) DO UPDATE SET active = 1, messages_received = 0, message_sent_last_date = NULL""",
                 (chat_id, username),
             )
         self._conn.commit()

@@ -26,8 +26,8 @@ class SQLiteDriver(DatabaseDriver):
 
     def add_subscriber(self, chat_id: str, username: str | None = None) -> None:
         self._conn.execute(
-            """INSERT OR REPLACE INTO subscribers (chat_id, username, active)
-               VALUES (?, ?, 1)""",
+            """INSERT OR REPLACE INTO subscribers (chat_id, username, active, messages_received, message_sent_last_date)
+               VALUES (?, ?, 1, 0, NULL)""",
             (chat_id, username),
         )
         self._conn.commit()
