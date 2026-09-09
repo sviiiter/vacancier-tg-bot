@@ -57,6 +57,8 @@ class UpdateHandler:
 
         elif text in ["/stop", "/unsubscribe"]:
             driver.remove_subscriber(chat_id)
+            if self._redis:
+                self._redis.delete(f"pending:{chat_id}")
             reply = "👋 Unsubscribed. You won't receive any more messages."
             self._send_reply(sender, chat_id, reply)
             log.info("Subscriber removed: chat_id=%s", chat_id)

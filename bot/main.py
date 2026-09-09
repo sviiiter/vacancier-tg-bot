@@ -114,6 +114,15 @@ def run() -> None:
                     message_ids = [int(mid.decode() if isinstance(mid, bytes) else mid) for mid in pending_ids]
                     messages = driver.get_messages_by_ids(message_ids)
 
+                    # Cap delivery to remaining trial quota for free subscribers on message-based trial
+                    if sub["plan"] == "free" and settings["trial_type"] == "messages":
+                        remaining = settings["trial_message_limit"] - sub["messages_received"]
+                        if remaining <= 0:
+                            log.debug("Subscriber %s has no remaining trial messages (%d/%d)",
+                                     chat_id_str, sub["messages_received"], settings["trial_message_limit"])
+                            continue
+                        messages = messages[:remaining]
+
                     last_created_date = None
                     free_count = 0
 
