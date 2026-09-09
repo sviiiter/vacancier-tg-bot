@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 import psycopg2
 import psycopg2.extras
 from bot.db.base import DatabaseDriver
@@ -107,10 +108,11 @@ class PostgresDriver(DatabaseDriver):
         if not chat_ids:
             return
         with self._conn.cursor() as cur:
-            cur.execute(
-                "UPDATE subscribers SET messages_received = messages_received + 1 WHERE chat_id = ANY(%s)",
-                (chat_ids,),
-            )
+            for chat_id, count in Counter(chat_ids).items():
+                cur.execute(
+                    "UPDATE subscribers SET messages_received = messages_received + %s WHERE chat_id = %s",
+                    (count, chat_id),
+                )
         self._conn.commit()
 
     def mark_trial_notice_sent(self, chat_id: str) -> None:

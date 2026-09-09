@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 import sqlite3
 from bot.db.base import DatabaseDriver
 
@@ -95,11 +96,11 @@ class SQLiteDriver(DatabaseDriver):
     def increment_messages_received(self, chat_ids: list[str]) -> None:
         if not chat_ids:
             return
-        placeholders = ",".join("?" * len(chat_ids))
-        self._conn.execute(
-            f"UPDATE subscribers SET messages_received = messages_received + 1 WHERE chat_id IN ({placeholders})",
-            chat_ids,
-        )
+        for chat_id, count in Counter(chat_ids).items():
+            self._conn.execute(
+                "UPDATE subscribers SET messages_received = messages_received + ? WHERE chat_id = ?",
+                (count, chat_id),
+            )
         self._conn.commit()
 
     def mark_trial_notice_sent(self, chat_id: str) -> None:
