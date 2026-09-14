@@ -428,17 +428,22 @@ Click the <b>➕ Create</b> button in your pinned menu to get started!
 
         flow[step] = words_list
         self._save_flow(chat_id, flow)
+
+        # Send feedback and redisplay the keyword selection menu
+        sender.send_message(f"✓ '{word}' {action} {step}.", chat_id)
+        self._handle_create_filter_build_json(chat_id, driver, sender)
         log.debug("Toggled word: chat_id=%s, word=%s, action=%s", chat_id, word, action)
 
     def _handle_create_filter_custom(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
         """Ask for custom keyword input."""
         flow = self._get_flow(chat_id)
         if not flow:
+            sender.send_message("No active filter creation. Use /add_filter to start.", chat_id)
             return
 
         flow["awaiting_custom_text"] = True
         self._save_flow(chat_id, flow)
-        sender.send_message(f"Type a custom keyword for the <b>{flow.get('step', 'required')}</b> category (or /cancel):")
+        sender.send_message(f"Type a custom keyword for the <b>{flow.get('step', 'required')}</b> category (or /cancel):", chat_id)
 
     def _handle_create_filter_step(self, chat_id: str, direction: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
         """Move to next/previous step in keyword filter builder."""
