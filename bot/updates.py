@@ -148,15 +148,32 @@ class UpdateHandler:
 
         elif text == "/help":
             reply = """
-Available commands:
+<b>📚 Available Commands</b>
+
+<b>Subscription:</b>
 /start - Subscribe to job postings
 /stop - Unsubscribe
-/plan - View your current plan and pricing
-/filters - List your keyword filters
-/updates - Get latest matching job postings
+/plan - View current plan and pricing
 /upgrade - View subscription plans
 /cancel - Cancel auto-renewal
+
+<b>Filter Management:</b>
+/filters - List your keyword filters
+Filter menu appears on subscribe - Create/Remove filters via buttons
+
+<b>Job Updates:</b>
+/updates - Get latest matching job postings
+
+<b>Info:</b>
 /help - Show this message
+
+<b>📋 About Filters</b>
+Create filters to get only relevant job postings:
+• Pick from shared filter library
+• Build custom keyword filters (required, any, exclude)
+• Upload CV for AI-based matching (coming soon)
+
+Click the <b>➕ Create</b> button in your pinned menu to get started!
 """
             self._send_reply(sender, chat_id, reply)
 
@@ -684,11 +701,11 @@ Available commands:
                     preview = driver.get_filter_preview(rules, limit=3)
                     preview_box = render_preview_box(preview, rules)
                     text = f"<b>{name}</b>\n<code>{expr}</code>\n\n<pre>{html.escape(preview_box)}</pre>"
-                    sender.send_message(text)
+                    sender.send_message(text, chat_id)
                 else:
                     filename = driver.get_file_name(f.get("file_id")) if f.get("file_id") else "Unknown"
                     text = f"<b>{name}</b>\nCV file: {filename}\n(AI matching coming soon)"
-                    sender.send_message(text)
+                    sender.send_message(text, chat_id)
 
             log.info("Sent filters to %s", chat_id)
         except Exception as e:
@@ -735,7 +752,11 @@ Available commands:
                 link = msg.get("tg_message_link", "")
                 reply += f"🔗 {link}\n{desc}...\n\n"
 
-            self._send_reply(sender, chat_id, reply)
+            # Send with filter creation button
+            buttons = [
+                ("➕ Create Filter", "filter:create:start"),
+            ]
+            sender.send_menu(chat_id, reply, buttons)
 
             # Clear pending messages and update last_sent_date
             self._redis.delete(key)
