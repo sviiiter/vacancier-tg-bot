@@ -707,6 +707,12 @@ Click the <b>➕ Create</b> button in your pinned menu to get started!
                     text = f"<b>{name}</b>\nCV file: {filename}\n(AI matching coming soon)"
                     sender.send_message(text, chat_id)
 
+            # Send menu with filter creation button
+            buttons = [
+                ("➕ Create Filter", "filter:create:start"),
+            ]
+            sender.send_menu(chat_id, "Want to add more filters?", buttons)
+
             log.info("Sent filters to %s", chat_id)
         except Exception as e:
             log.error("Error fetching filters for %s: %s", chat_id, e)
@@ -752,11 +758,7 @@ Click the <b>➕ Create</b> button in your pinned menu to get started!
                 link = msg.get("tg_message_link", "")
                 reply += f"🔗 {link}\n{desc}...\n\n"
 
-            # Send with filter creation button
-            buttons = [
-                ("➕ Create Filter", "filter:create:start"),
-            ]
-            sender.send_menu(chat_id, reply, buttons)
+            self._send_reply(sender, chat_id, reply)
 
             # Clear pending messages and update last_sent_date
             self._redis.delete(key)
