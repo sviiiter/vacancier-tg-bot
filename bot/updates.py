@@ -595,7 +595,25 @@ Click the <b>➕ Create</b> button in your pinned menu to get started!
                 flow[step] = words_list
             flow["awaiting_custom_text"] = False
             self._save_flow(chat_id, flow)
-            sender.send_message(f"✓ Added '{word}' to {step}. Continue building or proceed to the next step.")
+
+            # Send confirmation
+            sender.send_message(f"✓ Added '{word}' to {step}.", chat_id)
+
+            # Re-display the keyword selection menu
+            known_words = flow.get("known_words", [])
+            step_names = ["required", "any", "exclude"]
+            current_step_num = step_names.index(step) if step in step_names else 0
+            step_label = ["Step 1: Required Keywords", "Step 2: Optional Keywords", "Step 3: Exclude Keywords"][current_step_num]
+            text_msg = f"📝 Build Keyword Filter - {step_label}\n\nCurrent selection: <b>{', '.join(words_list) or 'None'}</b>\n\nPick more words:"
+
+            rows = []
+            for i, word_opt in enumerate(known_words[:12]):
+                if i % 3 == 0:
+                    rows.append([])
+                rows[-1].append((word_opt, f"filter:create:word:{i}"))
+
+            rows.append([("➕ Add Custom", "filter:create:custom"), ("Next →", "filter:create:step:next")])
+            sender.send_grid_menu(chat_id, text_msg, rows)
 
         elif flow.get("awaiting_name"):
             name = text.strip()
