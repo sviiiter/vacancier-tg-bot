@@ -1,12 +1,15 @@
 import json
 import logging
+import base64
 import httpx
 import redis
 from datetime import datetime, timedelta
 from bot.db.base import DatabaseDriver
 from bot.sender import TelegramSender
 from bot.trial import is_trial_active
+from bot.filter_format import render_boolean_expression, render_preview_box
 import bot.config as cfg
+import html
 
 log = logging.getLogger(__name__)
 
@@ -32,10 +35,43 @@ class UpdateHandler:
             log.error("Error fetching updates: %s", e)
             return []
 
+    def _get_flow(self, chat_id: str) -> dict | None:
+        """Get active flow state from Redis."""
+        if not self._redis:
+            return None
+        try:
+            flow_json = self._redis.get(f"flow:{chat_id}")
+            return json.loads(flow_json) if flow_json else None
+        except Exception as e:
+            log.error("Error getting flow for %s: %s", chat_id, e)
+            return None
+
+    def _save_flow(self, chat_id: str, state: dict) -> None:
+        """Save flow state to Redis with 10-minute TTL."""
+        if not self._redis:
+            return
+        try:
+            self._redis.setex(f"flow:{chat_id}", 600, json.dumps(state))
+        except Exception as e:
+            log.error("Error saving flow for %s: %s", chat_id, e)
+
+    def _clear_flow(self, chat_id: str) -> None:
+        """Clear flow state from Redis."""
+        if not self._redis:
+            return
+        try:
+            self._redis.delete(f"flow:{chat_id}")
+        except Exception as e:
+            log.error("Error clearing flow for %s: %s", chat_id, e)
+
     def handle_update(self, update: dict, driver: DatabaseDriver, sender: TelegramSender) -> None:
         """Process a single update (commands, payments, etc.)."""
         if "message" in update:
-            self._handle_message(update["message"], driver, sender)
+            message = update["message"]
+            if "document" in message:
+                self._handle_document(message, driver, sender)
+            else:
+                self._handle_message(message, driver, sender)
         elif "callback_query" in update:
             self._handle_callback_query(update["callback_query"], driver, sender)
         elif "pre_checkout_query" in update:
@@ -49,10 +85,16 @@ class UpdateHandler:
         username = message.get("from", {}).get("username")
         text = message.get("text", "").strip()
 
+        if not text.startswith("/"):
+            flow = self._get_flow(chat_id)
+            if flow and (flow.get("awaiting_custom_text") or flow.get("awaiting_name")):
+                self._handle_flow_text_input(chat_id, text, flow, driver, sender)
+                return
+
         if text in ["/start", "/subscribe"]:
             driver.add_subscriber(chat_id, username)
-            reply = "✅ Subscribed! You'll now receive job postings."
-            self._send_reply(sender, chat_id, reply)
+            self._send_reply(sender, chat_id, "✅ Subscribed! You'll now receive job postings.")
+            self._send_and_pin_filter_menu(chat_id, sender)
             log.info("Subscriber added: chat_id=%s, username=%s", chat_id, username)
 
         elif text in ["/stop", "/unsubscribe"]:
@@ -127,6 +169,10 @@ Available commands:
         chat_id = str(callback_query.get("from", {}).get("id"))
         data = callback_query.get("data", "")
         settings = driver.get_settings()
+
+        if data.startswith("filter:"):
+            self._handle_filter_callback(query_id, chat_id, data, driver, sender)
+            return
 
         if data == "buy:monthly":
             payload = f"{chat_id}:monthly"
@@ -209,6 +255,354 @@ Available commands:
         self._send_reply(sender, chat_id, reply)
         log.info("Payment processed: chat_id=%s, plan=%s, charge_id=%s", chat_id, plan, charge_id)
 
+    def _handle_filter_callback(self, query_id: str, chat_id: str, data: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Route filter: callbacks to appropriate handlers."""
+        try:
+            sender.answer_callback_query(query_id)
+        except Exception as e:
+            log.debug("Error answering callback query: %s", e)
+
+        if data == "filter:create:start":
+            self._handle_create_filter_start(chat_id, driver, sender)
+        elif data == "filter:create:library":
+            self._handle_create_filter_library(chat_id, driver, sender)
+        elif data.startswith("filter:create:library:pick:"):
+            filter_id = int(data.split(":")[-1])
+            self._handle_create_filter_library_pick(chat_id, filter_id, driver, sender)
+        elif data == "filter:create:build:json":
+            self._handle_create_filter_build_json(chat_id, driver, sender)
+        elif data == "filter:create:build:file":
+            self._handle_create_filter_build_file(chat_id, driver, sender)
+        elif data.startswith("filter:create:word:"):
+            idx = int(data.split(":")[-1])
+            self._handle_create_filter_word(chat_id, idx, driver, sender)
+        elif data == "filter:create:custom":
+            self._handle_create_filter_custom(chat_id, driver, sender)
+        elif data.startswith("filter:create:step:"):
+            step = data.split(":")[-1]
+            self._handle_create_filter_step(chat_id, step, driver, sender)
+        elif data == "filter:create:confirm":
+            self._handle_create_filter_confirm(chat_id, driver, sender)
+        elif data == "filter:create:cancel":
+            self._handle_create_filter_cancel(chat_id, sender)
+        elif data == "filter:remove:menu":
+            self._handle_remove_filter_menu(chat_id, driver, sender)
+        elif data.startswith("filter:remove:pick:"):
+            filter_id = int(data.split(":")[-1])
+            self._handle_remove_filter_pick(chat_id, filter_id, driver, sender)
+        elif data == "filter:remove:all:ask":
+            self._handle_remove_all_filters_ask(chat_id, sender)
+        elif data == "filter:remove:all:yes":
+            self._handle_remove_all_filters_yes(chat_id, driver, sender)
+        elif data == "filter:remove:all:no":
+            self._handle_remove_all_filters_no(chat_id, sender)
+        elif data == "filter:remove:cancel":
+            self._handle_remove_filter_cancel(chat_id, sender)
+        else:
+            log.warning("Unknown filter callback: %s", data)
+
+    def _handle_create_filter_start(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Start the filter creation flow."""
+        flow = {"step": "start", "type": None, "required": [], "any": [], "exclude": [], "known_words": []}
+        self._save_flow(chat_id, flow)
+        text = "📝 Create Filter\n\nChoose how to create your filter:"
+        buttons = [
+            ("📚 From Library", "filter:create:library"),
+            ("🔨 Build Keyword Filter", "filter:create:build:json"),
+            ("📄 Upload CV", "filter:create:build:file"),
+            ("❌ Cancel", "filter:create:cancel"),
+        ]
+        sender.send_menu(chat_id, text, buttons)
+
+    def _handle_create_filter_library(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Show available filters from the library."""
+        try:
+            filters = driver.list_filter_library()
+            if not filters:
+                sender.send_message("No filters available in the library yet.", chat_id)
+                self._clear_flow(chat_id)
+                return
+
+            flow = {"step": "library", "type": None}
+            self._save_flow(chat_id, flow)
+
+            text = "📚 Available Filters:\n\nPick one to add to your collection:"
+            buttons = []
+            for f in filters[:10]:
+                name = f.get("name", f"Filter #{f['id']}")
+                buttons.append((f"✓ {name}", f"filter:create:library:pick:{f['id']}"))
+
+            buttons.append(("❌ Cancel", "filter:create:cancel"))
+            sender.send_menu(chat_id, text, buttons)
+        except Exception as e:
+            log.error("Error showing filter library for %s: %s", chat_id, e)
+            sender.send_message("Error loading filter library.", chat_id)
+            self._clear_flow(chat_id)
+
+    def _handle_create_filter_library_pick(self, chat_id: str, filter_id: int, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Link subscriber to a library filter."""
+        try:
+            driver.link_subscriber_to_filter(chat_id, filter_id)
+            sender.send_message("✅ Filter added to your collection!", chat_id)
+            self._clear_flow(chat_id)
+            log.info("Filter linked: chat_id=%s, filter_id=%s", chat_id, filter_id)
+        except Exception as e:
+            log.error("Error linking filter for %s: %s", chat_id, e)
+            sender.send_message("Error adding filter. Please try again.", chat_id)
+            self._clear_flow(chat_id)
+
+    def _handle_create_filter_build_json(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Start building a keyword-based filter."""
+        try:
+            known_words = driver.get_known_keywords()
+            flow = {
+                "step": "required",
+                "type": "json",
+                "required": [],
+                "any": [],
+                "exclude": [],
+                "known_words": known_words,
+                "awaiting_custom_text": False,
+            }
+            self._save_flow(chat_id, flow)
+
+            text = "📝 Build Keyword Filter - Step 1: Required Keywords\n\nPick words that <b>MUST</b> appear in the job title/description:"
+            rows = []
+            for i, word in enumerate(known_words[:12]):
+                if i % 3 == 0:
+                    rows.append([])
+                rows[-1].append((word, f"filter:create:word:{i}"))
+
+            rows.append([("➕ Add Custom", "filter:create:custom"), ("Next →", "filter:create:step:next")])
+            sender.send_grid_menu(chat_id, text, rows)
+        except Exception as e:
+            log.error("Error building JSON filter for %s: %s", chat_id, e)
+            sender.send_message("Error starting filter builder.", chat_id)
+            self._clear_flow(chat_id)
+
+    def _handle_create_filter_build_file(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Start CV file filter setup."""
+        flow = {"step": "await_document", "type": "file"}
+        self._save_flow(chat_id, flow)
+        sender.send_message("📄 Upload your CV\n\nSend a PDF or document file to use for AI-based matching:", chat_id)
+
+    def _handle_create_filter_word(self, chat_id: str, idx: int, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Toggle a keyword in the current filter step."""
+        flow = self._get_flow(chat_id)
+        if not flow:
+            sender.send_message("No active filter creation. Use /add_filter to start.", chat_id)
+            return
+
+        known_words = flow.get("known_words", [])
+        if idx >= len(known_words):
+            log.warning("Word index out of range: chat_id=%s, idx=%d", chat_id, idx)
+            return
+
+        word = known_words[idx].lower()
+        step = flow.get("step", "required")
+        words_list = flow.get(step, [])
+
+        if word in words_list:
+            words_list.remove(word)
+            action = "removed from"
+        else:
+            words_list.append(word)
+            action = "added to"
+
+        flow[step] = words_list
+        self._save_flow(chat_id, flow)
+        log.debug("Toggled word: chat_id=%s, word=%s, action=%s", chat_id, word, action)
+
+    def _handle_create_filter_custom(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Ask for custom keyword input."""
+        flow = self._get_flow(chat_id)
+        if not flow:
+            return
+
+        flow["awaiting_custom_text"] = True
+        self._save_flow(chat_id, flow)
+        sender.send_message(f"Type a custom keyword for the <b>{flow.get('step', 'required')}</b> category (or /cancel):")
+
+    def _handle_create_filter_step(self, chat_id: str, direction: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Move to next/previous step in keyword filter builder."""
+        flow = self._get_flow(chat_id)
+        if not flow:
+            return
+
+        step_order = ["required", "any", "exclude"]
+        current_idx = step_order.index(flow.get("step", "required"))
+
+        if direction == "next":
+            next_idx = min(current_idx + 1, len(step_order) - 1)
+            if next_idx == current_idx:
+                flow["step"] = "name"
+                flow["awaiting_name"] = True
+                self._save_flow(chat_id, flow)
+                sender.send_message("📝 Give your filter a name (or /cancel):", chat_id)
+                return
+
+            flow["step"] = step_order[next_idx]
+        elif direction == "back":
+            next_idx = max(current_idx - 1, 0)
+            flow["step"] = step_order[next_idx]
+
+        self._save_flow(chat_id, flow)
+        self._handle_create_filter_build_json(chat_id, driver, sender)
+
+    def _handle_create_filter_confirm(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Confirm and create the filter."""
+        flow = self._get_flow(chat_id)
+        if not flow:
+            return
+
+        try:
+            rules = {
+                "required": flow.get("required", []),
+                "any": flow.get("any", []),
+                "exclude": flow.get("exclude", []),
+            }
+            extra = json.dumps(rules)
+            name = flow.get("name", "Unnamed Filter")
+            file_id = flow.get("file_id")
+
+            filter_id = driver.create_filter(name, flow.get("type", "json"), extra=extra if flow.get("type") == "json" else None, file_id=file_id if flow.get("type") == "file" else None)
+            driver.link_subscriber_to_filter(chat_id, filter_id)
+
+            self._clear_flow(chat_id)
+            sender.send_message(f"✅ Filter '{name}' created and added to your collection!")
+            log.info("Filter created: chat_id=%s, filter_id=%s, name=%s", chat_id, filter_id, name)
+        except Exception as e:
+            log.error("Error creating filter for %s: %s", chat_id, e)
+            sender.send_message("Error creating filter. Please try again.", chat_id)
+            self._clear_flow(chat_id)
+
+    def _handle_create_filter_cancel(self, chat_id: str, sender: TelegramSender) -> None:
+        """Cancel filter creation."""
+        self._clear_flow(chat_id)
+        sender.send_message("❌ Filter creation cancelled.", chat_id)
+
+    def _handle_remove_filter_menu(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Show filters to remove."""
+        try:
+            filters = driver.get_subscriber_filters(chat_id)
+            if not filters:
+                sender.send_message("You have no filters to remove.", chat_id)
+                return
+
+            text = "🗑️ Remove Filter\n\nChoose a filter to remove (it will be unlinked from your account, not deleted):"
+            buttons = []
+            for f in filters:
+                name = f.get("name", f"Filter #{f['id']}")
+                buttons.append((f"❌ {name}", f"filter:remove:pick:{f['id']}"))
+            buttons.append(("↩️ Back", "filter:create:start"))
+
+            sender.send_menu(chat_id, text, buttons)
+        except Exception as e:
+            log.error("Error showing remove menu for %s: %s", chat_id, e)
+            sender.send_message("Error loading filters.", chat_id)
+
+    def _handle_remove_filter_pick(self, chat_id: str, filter_id: int, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Remove (unlink) a filter."""
+        try:
+            driver.unlink_subscriber_filter(chat_id, filter_id)
+            sender.send_message("✅ Filter removed from your collection.", chat_id)
+            log.info("Filter unlinked: chat_id=%s, filter_id=%s", chat_id, filter_id)
+        except Exception as e:
+            log.error("Error removing filter for %s: %s", chat_id, e)
+            sender.send_message("Error removing filter.", chat_id)
+
+    def _handle_remove_all_filters_ask(self, chat_id: str, sender: TelegramSender) -> None:
+        """Confirm removing all filters."""
+        text = "⚠️ Remove All Filters\n\nAre you sure you want to remove all filters?"
+        buttons = [
+            ("✅ Yes, remove all", "filter:remove:all:yes"),
+            ("❌ No, cancel", "filter:remove:all:no"),
+        ]
+        sender.send_menu(chat_id, text, buttons)
+
+    def _handle_remove_all_filters_yes(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Remove all filters."""
+        try:
+            count = driver.unlink_all_subscriber_filters(chat_id)
+            sender.send_message(f"✅ Removed {count} filter(s) from your collection.")
+            log.info("All filters removed: chat_id=%s, count=%d", chat_id, count)
+        except Exception as e:
+            log.error("Error removing all filters for %s: %s", chat_id, e)
+            sender.send_message("Error removing filters.", chat_id)
+
+    def _handle_remove_all_filters_no(self, chat_id: str, sender: TelegramSender) -> None:
+        """Cancel remove all filters."""
+        sender.send_message("❌ Cancelled.", chat_id)
+
+    def _handle_remove_filter_cancel(self, chat_id: str, sender: TelegramSender) -> None:
+        """Cancel remove filter."""
+        sender.send_message("❌ Cancelled.", chat_id)
+
+    def _handle_flow_text_input(self, chat_id: str, text: str, flow: dict, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Handle text input during an active wizard flow."""
+        if flow.get("awaiting_custom_text"):
+            word = text.lower().strip()
+            step = flow.get("step", "required")
+            words_list = flow.get(step, [])
+            if word and word not in words_list:
+                words_list.append(word)
+                flow[step] = words_list
+            flow["awaiting_custom_text"] = False
+            self._save_flow(chat_id, flow)
+            sender.send_message(f"✓ Added '{word}' to {step}. Continue building or proceed to the next step.")
+
+        elif flow.get("awaiting_name"):
+            name = text.strip()
+            flow["name"] = name
+            flow["awaiting_name"] = False
+            self._save_flow(chat_id, flow)
+
+            rules = {
+                "required": flow.get("required", []),
+                "any": flow.get("any", []),
+                "exclude": flow.get("exclude", []),
+            }
+            expr = render_boolean_expression(rules)
+            preview = driver.get_filter_preview(rules, limit=3)
+            preview_box = render_preview_box(preview, rules)
+
+            text_msg = f"<b>{name}</b>\n<code>{expr}</code>\n\n<pre>{html.escape(preview_box)}</pre>\n\n✅ Ready to save?"
+            buttons = [
+                ("💾 Save", "filter:create:confirm"),
+                ("❌ Cancel", "filter:create:cancel"),
+            ]
+            sender.send_menu(chat_id, text_msg, buttons)
+
+    def _handle_document(self, message: dict, driver: DatabaseDriver, sender: TelegramSender) -> None:
+        """Handle document upload for CV-based filters."""
+        chat_id = str(message.get("chat", {}).get("id"))
+        flow = self._get_flow(chat_id)
+
+        if not flow or flow.get("type") != "file" or flow.get("step") != "await_document":
+            sender.send_message("No active file filter creation. Use the menu to create a filter.", chat_id)
+            return
+
+        try:
+            doc = message.get("document", {})
+            file_id = doc.get("file_id")
+            filename = doc.get("file_name", "document")
+
+            file_path = sender.get_file_path(file_id)
+            content_bytes = sender.download_file(file_path)
+            content_b64 = base64.b64encode(content_bytes).decode("utf-8")
+
+            stored_file_id = driver.insert_file(filename, content_b64)
+            flow["file_id"] = stored_file_id
+            flow["step"] = "name"
+            flow["awaiting_name"] = True
+            self._save_flow(chat_id, flow)
+
+            sender.send_message(f"📄 File '{filename}' uploaded. Now give your filter a name:")
+        except Exception as e:
+            log.error("Error handling document for %s: %s", chat_id, e)
+            sender.send_message("Error uploading file. Please try again.", chat_id)
+            self._clear_flow(chat_id)
+
     def _handle_plan_command(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
         """Handle /plan command."""
         sub = driver.get_subscriber(chat_id)
@@ -263,7 +657,7 @@ Available commands:
         return reply
 
     def _handle_filters_command(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
-        """Handle /filters command - list user's filters."""
+        """Handle /filters command - list user's filters with previews."""
         sub = driver.get_subscriber(chat_id)
         if not sub or not sub.get("active"):
             reply = "You must be subscribed to manage filters."
@@ -273,21 +667,29 @@ Available commands:
         try:
             filters = driver.get_subscriber_filters(chat_id)
             if not filters:
-                reply = "You have no filters configured yet.\nUse /add_filter to create one."
+                reply = "You have no filters configured yet.\nUse the filter menu to create one."
                 self._send_reply(sender, chat_id, reply)
                 return
 
-            reply = "📋 Your filters:\n\n"
+            sender.send_message("📋 Your filters:", chat_id)
             for f in filters:
                 filter_type = f.get("type", "unknown")
                 name = f.get("name", "Unnamed")
-                if filter_type == "json":
-                    keywords = f.get("extra", "")
-                    reply += f"#{f['id']} {name}: {keywords}\n"
-                else:
-                    reply += f"#{f['id']} {name} (OpenAI)\n"
+                filter_id = f.get("id")
 
-            self._send_reply(sender, chat_id, reply)
+                if filter_type == "json":
+                    extra_str = f.get("extra", "{}")
+                    rules = json.loads(extra_str) if extra_str else {}
+                    expr = render_boolean_expression(rules)
+                    preview = driver.get_filter_preview(rules, limit=3)
+                    preview_box = render_preview_box(preview, rules)
+                    text = f"<b>{name}</b>\n<code>{expr}</code>\n\n<pre>{html.escape(preview_box)}</pre>"
+                    sender.send_message(text)
+                else:
+                    filename = driver.get_file_name(f.get("file_id")) if f.get("file_id") else "Unknown"
+                    text = f"<b>{name}</b>\nCV file: {filename}\n(AI matching coming soon)"
+                    sender.send_message(text)
+
             log.info("Sent filters to %s", chat_id)
         except Exception as e:
             log.error("Error fetching filters for %s: %s", chat_id, e)
@@ -344,6 +746,26 @@ Available commands:
             log.error("Error handling /updates for %s: %s", chat_id, e)
             reply = "Error loading updates. Please try again."
             self._send_reply(sender, chat_id, reply)
+
+    def _send_and_pin_filter_menu(self, chat_id: str, sender: TelegramSender) -> None:
+        """Send and pin the filter management menu on subscribe."""
+        try:
+            sender.unpin_all_chat_messages(chat_id)
+        except Exception as e:
+            log.debug("Warning unpinning messages for %s: %s", chat_id, e)
+
+        try:
+            text = "📋 Filter Management\n\n• <b>Create</b> - Add a new filter from shared library or build keyword rules\n• <b>Remove</b> - Unlink a filter\n• <b>Remove All</b> - Clear all filters\n\nUse the buttons below to manage your filters:"
+            buttons = [
+                ("➕ Create", "filter:create:start"),
+                ("➖ Remove", "filter:remove:menu"),
+                ("🗑️ Remove All", "filter:remove:all:ask"),
+            ]
+            msg_id = sender.send_menu(chat_id, text, buttons)
+            sender.pin_chat_message(chat_id, msg_id)
+            log.info("Pinned filter menu for %s", chat_id)
+        except Exception as e:
+            log.error("Error pinning filter menu for %s: %s", chat_id, e)
 
     def _send_reply(self, sender: TelegramSender, chat_id: str, text: str) -> None:
         """Send a reply message to the user."""

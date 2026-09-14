@@ -80,7 +80,7 @@ class TelegramSender:
             log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
         resp.raise_for_status()
 
-    def send_menu(self, chat_id: str, text: str, buttons: list[tuple[str, str]]) -> None:
+    def send_menu(self, chat_id: str, text: str, buttons: list[tuple[str, str]]) -> int:
         url = self._api_base.format(token=self._token, method="sendMessage")
         keyboard = {"inline_keyboard": [[{"text": btn_text, "callback_data": btn_data}] for btn_text, btn_data in buttons]}
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard}
@@ -89,6 +89,7 @@ class TelegramSender:
         if resp.status_code != 200:
             log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
         resp.raise_for_status()
+        return resp.json()["result"]["message_id"]
 
     def cancel_star_subscription(self, chat_id: str, charge_id: str) -> None:
         url = self._api_base.format(token=self._token, method="editUserStarSubscription")
@@ -98,6 +99,81 @@ class TelegramSender:
         if resp.status_code != 200:
             log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
         resp.raise_for_status()
+
+    def send_grid_menu(self, chat_id: str, text: str, rows: list[list[tuple[str, str]]]) -> int:
+        url = self._api_base.format(token=self._token, method="sendMessage")
+        keyboard = {"inline_keyboard": [[{"text": btn_text, "callback_data": btn_data} for btn_text, btn_data in row] for row in rows]}
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard}
+        log.debug("Sending grid menu - chat_id=%s", chat_id)
+        resp = self._client.post(url, json=payload)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+        return resp.json()["result"]["message_id"]
+
+    def edit_message_text(self, chat_id: str, message_id: int, text: str, rows: list[list[tuple[str, str]]] | None = None) -> None:
+        url = self._api_base.format(token=self._token, method="editMessageText")
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML"}
+        if rows is not None:
+            keyboard = {"inline_keyboard": [[{"text": btn_text, "callback_data": btn_data} for btn_text, btn_data in row] for row in rows]}
+            payload["reply_markup"] = keyboard
+        log.debug("Editing message - chat_id=%s, message_id=%s", chat_id, message_id)
+        resp = self._client.post(url, json=payload)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+
+    def answer_callback_query(self, callback_query_id: str, text: str | None = None, show_alert: bool = False) -> None:
+        url = self._api_base.format(token=self._token, method="answerCallbackQuery")
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        if show_alert:
+            payload["show_alert"] = True
+        log.debug("Answering callback query - query_id=%s", callback_query_id)
+        resp = self._client.post(url, json=payload)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+
+    def pin_chat_message(self, chat_id: str, message_id: int, disable_notification: bool = True) -> None:
+        url = self._api_base.format(token=self._token, method="pinChatMessage")
+        payload = {"chat_id": chat_id, "message_id": message_id}
+        if disable_notification:
+            payload["disable_notification"] = True
+        log.debug("Pinning message - chat_id=%s, message_id=%s", chat_id, message_id)
+        resp = self._client.post(url, json=payload)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+
+    def unpin_all_chat_messages(self, chat_id: str) -> None:
+        url = self._api_base.format(token=self._token, method="unpinAllChatMessages")
+        payload = {"chat_id": chat_id}
+        log.debug("Unpinning all messages - chat_id=%s", chat_id)
+        resp = self._client.post(url, json=payload)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+
+    def get_file_path(self, file_id: str) -> str:
+        url = self._api_base.format(token=self._token, method="getFile")
+        payload = {"file_id": file_id}
+        log.debug("Getting file path - file_id=%s", file_id)
+        resp = self._client.post(url, json=payload)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+        return resp.json()["result"]["file_path"]
+
+    def download_file(self, file_path: str) -> bytes:
+        url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+        log.debug("Downloading file - file_path=%s", file_path)
+        resp = self._client.get(url)
+        if resp.status_code != 200:
+            log.error("Telegram API error: status=%d, response=%s", resp.status_code, resp.text)
+        resp.raise_for_status()
+        return resp.content
 
     def close(self) -> None:
         self._client.close()

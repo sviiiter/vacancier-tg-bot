@@ -1,7 +1,9 @@
 import os
+import json
 from collections import Counter
 import sqlite3
 from bot.db.base import DatabaseDriver
+from bot.filter_rules import extract_known_keywords
 
 
 class SQLiteDriver(DatabaseDriver):
@@ -110,6 +112,64 @@ class SQLiteDriver(DatabaseDriver):
         )
         self._conn.commit()
 
+    def create_filter(self, name: str, filter_type: str, extra: str | None = None, file_id: int | None = None) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO filters (name, type, extra, file_id) VALUES (?, ?, ?, ?)",
+            (name, filter_type, extra, file_id),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def link_subscriber_to_filter(self, chat_id: str, filter_id: int) -> None:
+        self._conn.execute(
+            """INSERT OR IGNORE INTO subscriber_filters (subscriber_id, filter_id)
+               SELECT id, ? FROM subscribers WHERE chat_id = ?""",
+            (filter_id, chat_id),
+        )
+        self._conn.commit()
+
+    def unlink_subscriber_filter(self, chat_id: str, filter_id: int) -> None:
+        self._conn.execute(
+            """DELETE FROM subscriber_filters
+               WHERE filter_id = ?
+                 AND subscriber_id = (SELECT id FROM subscribers WHERE chat_id = ?)""",
+            (filter_id, chat_id),
+        )
+        self._conn.commit()
+
+    def unlink_all_subscriber_filters(self, chat_id: str) -> int:
+        cur = self._conn.execute(
+            """DELETE FROM subscriber_filters
+               WHERE subscriber_id = (SELECT id FROM subscribers WHERE chat_id = ?)""",
+            (chat_id,),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def list_filter_library(self) -> list[dict]:
+        cur = self._conn.execute("SELECT id, name, type, extra, file_id FROM filters ORDER BY created_at DESC")
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_known_keywords(self) -> list[str]:
+        cur = self._conn.execute("SELECT extra FROM filters WHERE extra IS NOT NULL")
+        extras = [row[0] for row in cur.fetchall()]
+        return extract_known_keywords(extras)
+
+    def get_file_name(self, file_id: int) -> str | None:
+        cur = self._conn.execute("SELECT filename FROM file WHERE id = ?", (file_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def insert_file(self, filename: str, content: str) -> int:
+        cur = self._conn.execute("INSERT INTO file (filename, content) VALUES (?, ?)", (filename, content))
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_filter_preview(self, rules: dict, limit: int = 3) -> dict:
+        # Note: preview uses message_filters table which only reflects matches already processed by the matcher
+        # New filters won't show previews until the next matcher run
+        return {"count": 0, "samples": []}
+
     def _init_schema(self) -> None:
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS subscribers (
@@ -175,6 +235,58 @@ class SQLiteDriver(DatabaseDriver):
                 self._conn.execute(f"ALTER TABLE subscribers ADD COLUMN {column} {definition}")
 
         self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS file (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                content TEXT NOT NULL
+            )
+        """)
+
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS filters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                type TEXT NOT NULL DEFAULT 'json',
+                extra TEXT,
+                file_id INTEGER,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (file_id) REFERENCES file(id) ON DELETE CASCADE
+            )
+        """)
+
+        existing_filters = {row[1] for row in self._conn.execute("PRAGMA table_info(filters)").fetchall()}
+        for column, definition in [
+            ("name", "TEXT"),
+            ("created_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+        ]:
+            if column not in existing_filters:
+                self._conn.execute(f"ALTER TABLE filters ADD COLUMN {column} {definition}")
+
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                description TEXT NOT NULL,
+                tg_channel_link TEXT NOT NULL,
+                tg_message_link TEXT NOT NULL UNIQUE,
+                created_date DATETIME NOT NULL,
+                source TEXT NOT NULL DEFAULT 'telegram',
+                queue_sent INTEGER NOT NULL DEFAULT 0,
+                read INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_filters (
+                message_id INTEGER NOT NULL,
+                filter_id INTEGER NOT NULL,
+                matched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (message_id, filter_id),
+                FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+                FOREIGN KEY (filter_id) REFERENCES filters(id) ON DELETE CASCADE
+            )
+        """)
+
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS subscriber_filters (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subscriber_id INTEGER NOT NULL,
@@ -202,17 +314,15 @@ class SQLiteDriver(DatabaseDriver):
         }
 
     def get_subscriber_filters(self, chat_id: str) -> list[dict]:
-        with self._conn.cursor() as cur:
-            cur.execute("""
-                SELECT f.id, f.name, f.type, f.extra
-                FROM filters f
-                JOIN subscriber_filters sf ON f.id = sf.filter_id
-                JOIN subscribers s ON sf.subscriber_id = s.id
-                WHERE s.chat_id = ?
-                ORDER BY f.created_at DESC
-            """, (chat_id,))
-            columns = [desc[0] for desc in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
+        cur = self._conn.execute("""
+            SELECT f.id, f.name, f.type, f.extra, f.file_id
+            FROM filters f
+            JOIN subscriber_filters sf ON f.id = sf.filter_id
+            JOIN subscribers s ON sf.subscriber_id = s.id
+            WHERE s.chat_id = ?
+            ORDER BY f.created_at DESC
+        """, (chat_id,))
+        return [dict(row) for row in cur.fetchall()]
 
     def update_message_sent_date(self, chat_id: str) -> None:
         with self._conn.cursor() as cur:

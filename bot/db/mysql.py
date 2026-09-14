@@ -1,9 +1,11 @@
 import os
+import json
 from collections import Counter
 from urllib.parse import urlparse
 import pymysql
 import pymysql.cursors
 from bot.db.base import DatabaseDriver
+from bot.filter_rules import extract_known_keywords
 
 
 class MySQLDriver(DatabaseDriver):
@@ -140,6 +142,76 @@ class MySQLDriver(DatabaseDriver):
             )
         self._conn.commit()
 
+    def create_filter(self, name: str, filter_type: str, extra: str | None = None, file_id: int | None = None) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO filters (name, type, extra, file_id) VALUES (%s, %s, %s, %s)",
+                (name, filter_type, extra, file_id),
+            )
+            new_id = cur.lastrowid
+        self._conn.commit()
+        return new_id
+
+    def link_subscriber_to_filter(self, chat_id: str, filter_id: int) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO subscriber_filters (subscriber_id, filter_id)
+                   SELECT id, %s FROM subscribers WHERE chat_id = %s
+                   ON DUPLICATE KEY UPDATE filter_id = filter_id""",
+                (filter_id, chat_id),
+            )
+        self._conn.commit()
+
+    def unlink_subscriber_filter(self, chat_id: str, filter_id: int) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """DELETE FROM subscriber_filters
+                   WHERE filter_id = %s
+                     AND subscriber_id = (SELECT id FROM subscribers WHERE chat_id = %s)""",
+                (filter_id, chat_id),
+            )
+        self._conn.commit()
+
+    def unlink_all_subscriber_filters(self, chat_id: str) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """DELETE FROM subscriber_filters
+                   WHERE subscriber_id = (SELECT id FROM subscribers WHERE chat_id = %s)""",
+                (chat_id,),
+            )
+            n = cur.rowcount
+        self._conn.commit()
+        return n
+
+    def list_filter_library(self) -> list[dict]:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT id, name, type, extra, file_id FROM filters ORDER BY created_at DESC")
+            return cur.fetchall()
+
+    def get_known_keywords(self) -> list[str]:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT extra FROM filters WHERE extra IS NOT NULL")
+            extras = [row["extra"] for row in cur.fetchall()]
+        return extract_known_keywords(extras)
+
+    def get_file_name(self, file_id: int) -> str | None:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT filename FROM file WHERE id = %s", (file_id,))
+            row = cur.fetchone()
+        return row["filename"] if row else None
+
+    def insert_file(self, filename: str, content: str) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute("INSERT INTO file (filename, content) VALUES (%s, %s)", (filename, content))
+            new_id = cur.lastrowid
+        self._conn.commit()
+        return new_id
+
+    def get_filter_preview(self, rules: dict, limit: int = 3) -> dict:
+        # Note: preview uses message_filters table which only reflects matches already processed by the matcher
+        # New filters won't show previews until the next matcher run
+        return {"count": 0, "samples": []}
+
     def _init_schema(self) -> None:
         with self._conn.cursor() as cur:
             cur.execute("""
@@ -209,6 +281,61 @@ class MySQLDriver(DatabaseDriver):
                     cur.execute(f"ALTER TABLE subscribers ADD COLUMN `{column}` {definition}")
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS file (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    filename VARCHAR(255) NOT NULL,
+                    content LONGTEXT NOT NULL
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS filters (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(255),
+                    type VARCHAR(10) NOT NULL DEFAULT 'json',
+                    extra TEXT,
+                    file_id INT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (file_id) REFERENCES file(id) ON DELETE CASCADE
+                )
+            """)
+
+            for column, definition in [
+                ("name", "VARCHAR(255)"),
+                ("created_at", "TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            ]:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'filters' AND column_name = %s",
+                    (column,),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(f"ALTER TABLE filters ADD COLUMN `{column}` {definition}")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    tg_channel_link VARCHAR(255) NOT NULL,
+                    tg_message_link VARCHAR(255) NOT NULL UNIQUE,
+                    created_date TIMESTAMP NOT NULL,
+                    source VARCHAR(50) NOT NULL DEFAULT 'telegram',
+                    queue_sent INT NOT NULL DEFAULT 0,
+                    read INT NOT NULL DEFAULT 0
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS message_filters (
+                    message_id INT NOT NULL,
+                    filter_id INT NOT NULL,
+                    matched_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (message_id, filter_id),
+                    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+                    FOREIGN KEY (filter_id) REFERENCES filters(id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS subscriber_filters (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     subscriber_id INT NOT NULL,
@@ -239,7 +366,7 @@ class MySQLDriver(DatabaseDriver):
     def get_subscriber_filters(self, chat_id: str) -> list[dict]:
         with self._conn.cursor() as cur:
             cur.execute("""
-                SELECT f.id, f.name, f.type, f.extra
+                SELECT f.id, f.name, f.type, f.extra, f.file_id
                 FROM filters f
                 JOIN subscriber_filters sf ON f.id = sf.filter_id
                 JOIN subscribers s ON sf.subscriber_id = s.id

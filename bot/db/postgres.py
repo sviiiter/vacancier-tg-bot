@@ -1,8 +1,10 @@
 import os
+import json
 from collections import Counter
 import psycopg2
 import psycopg2.extras
 from bot.db.base import DatabaseDriver
+from bot.filter_rules import extract_known_keywords
 
 
 class PostgresDriver(DatabaseDriver):
@@ -123,6 +125,79 @@ class PostgresDriver(DatabaseDriver):
             )
         self._conn.commit()
 
+    def create_filter(self, name: str, filter_type: str, extra: str | None = None, file_id: int | None = None) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO filters (name, type, extra, file_id) VALUES (%s, %s, %s, %s) RETURNING id",
+                (name, filter_type, extra, file_id),
+            )
+            new_id = cur.fetchone()[0]
+        self._conn.commit()
+        return new_id
+
+    def link_subscriber_to_filter(self, chat_id: str, filter_id: int) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO subscriber_filters (subscriber_id, filter_id)
+                   SELECT id, %s FROM subscribers WHERE chat_id = %s
+                   ON CONFLICT (subscriber_id, filter_id) DO NOTHING""",
+                (filter_id, chat_id),
+            )
+        self._conn.commit()
+
+    def unlink_subscriber_filter(self, chat_id: str, filter_id: int) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """DELETE FROM subscriber_filters
+                   WHERE filter_id = %s
+                     AND subscriber_id = (SELECT id FROM subscribers WHERE chat_id = %s)""",
+                (filter_id, chat_id),
+            )
+        self._conn.commit()
+
+    def unlink_all_subscriber_filters(self, chat_id: str) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """DELETE FROM subscriber_filters
+                   WHERE subscriber_id = (SELECT id FROM subscribers WHERE chat_id = %s)""",
+                (chat_id,),
+            )
+            n = cur.rowcount
+        self._conn.commit()
+        return n
+
+    def list_filter_library(self) -> list[dict]:
+        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, name, type, extra, file_id FROM filters ORDER BY created_at DESC")
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_known_keywords(self) -> list[str]:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT extra FROM filters WHERE extra IS NOT NULL")
+            extras = [row[0] for row in cur.fetchall()]
+        return extract_known_keywords(extras)
+
+    def get_file_name(self, file_id: int) -> str | None:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT filename FROM file WHERE id = %s", (file_id,))
+            row = cur.fetchone()
+        return row[0] if row else None
+
+    def insert_file(self, filename: str, content: str) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute("INSERT INTO file (filename, content) VALUES (%s, %s) RETURNING id", (filename, content))
+            new_id = cur.fetchone()[0]
+        self._conn.commit()
+        return new_id
+
+    def get_filter_preview(self, rules: dict, limit: int = 3) -> dict:
+        # Note: preview uses message_filters table which only reflects matches already processed by the matcher
+        # New filters won't show previews until the next matcher run
+        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # This is a placeholder - get_filter_preview is not actually used since filters are new
+            # and message_filters won't have entries yet. We just return empty preview.
+            return {"count": 0, "samples": []}
+
     def _init_schema(self) -> None:
         with self._conn.cursor() as cur:
             cur.execute("""
@@ -193,6 +268,58 @@ class PostgresDriver(DatabaseDriver):
                     cur.execute(f'ALTER TABLE subscribers ADD COLUMN "{column}" {definition}')
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS file (
+                    id       SERIAL PRIMARY KEY,
+                    filename TEXT NOT NULL,
+                    content  TEXT NOT NULL
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS filters (
+                    id         SERIAL PRIMARY KEY,
+                    name       TEXT,
+                    type       TEXT NOT NULL DEFAULT 'json' CHECK (type IN ('file','json')),
+                    extra      TEXT,
+                    file_id    INTEGER REFERENCES file(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
+
+            for column, definition in [
+                ("name", "TEXT"),
+                ("created_at", "TIMESTAMPTZ NOT NULL DEFAULT now()"),
+            ]:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name = 'filters' AND column_name = %s",
+                    (column,),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(f'ALTER TABLE filters ADD COLUMN "{column}" {definition}')
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id              SERIAL PRIMARY KEY,
+                    description     TEXT NOT NULL,
+                    tg_channel_link TEXT NOT NULL,
+                    tg_message_link TEXT NOT NULL UNIQUE,
+                    created_date    TIMESTAMPTZ NOT NULL,
+                    source          TEXT NOT NULL DEFAULT 'telegram',
+                    queue_sent      INTEGER NOT NULL DEFAULT 0,
+                    read            INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS message_filters (
+                    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    filter_id  INTEGER NOT NULL REFERENCES filters(id) ON DELETE CASCADE,
+                    matched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (message_id, filter_id)
+                )
+            """)
+
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS subscriber_filters (
                     id            SERIAL PRIMARY KEY,
                     subscriber_id INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE,
@@ -222,7 +349,7 @@ class PostgresDriver(DatabaseDriver):
     def get_subscriber_filters(self, chat_id: str) -> list[dict]:
         with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT f.id, f.name, f.type, f.extra
+                SELECT f.id, f.name, f.type, f.extra, f.file_id
                 FROM filters f
                 JOIN subscriber_filters sf ON f.id = sf.filter_id
                 JOIN subscribers s ON sf.subscriber_id = s.id

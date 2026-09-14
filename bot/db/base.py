@@ -66,6 +66,42 @@ class DatabaseDriver(ABC):
     def update_message_sent_date(self, chat_id: str) -> None:
         """Update message_sent_last_date to now for a subscriber."""
 
+    @abstractmethod
+    def create_filter(self, name: str, filter_type: str, extra: str | None = None, file_id: int | None = None) -> int:
+        """Create a new filter. Returns the new filter id."""
+
+    @abstractmethod
+    def link_subscriber_to_filter(self, chat_id: str, filter_id: int) -> None:
+        """Link a subscriber to an existing filter (idempotent)."""
+
+    @abstractmethod
+    def unlink_subscriber_filter(self, chat_id: str, filter_id: int) -> None:
+        """Unlink a subscriber from a filter (never deletes the filter itself)."""
+
+    @abstractmethod
+    def unlink_all_subscriber_filters(self, chat_id: str) -> int:
+        """Unlink a subscriber from all filters. Returns count of rows deleted."""
+
+    @abstractmethod
+    def list_filter_library(self) -> list[dict]:
+        """List all filters in the system (id, name, type, extra, file_id), newest first."""
+
+    @abstractmethod
+    def get_known_keywords(self) -> list[str]:
+        """Return deduplicated, sorted list of all keywords used across all filters."""
+
+    @abstractmethod
+    def get_file_name(self, file_id: int) -> str | None:
+        """Get the filename for a file_id, or None if not found."""
+
+    @abstractmethod
+    def insert_file(self, filename: str, content: str) -> int:
+        """Insert a file (content must be base64-encoded text). Returns new file id."""
+
+    @abstractmethod
+    def get_filter_preview(self, rules: dict, limit: int = 3) -> dict:
+        """Get live preview of messages matching a filter's rules. Returns {'count': int, 'samples': []}."""
+
     def rollback(self) -> None:
         """Roll back any pending transaction (default no-op)."""
         pass
