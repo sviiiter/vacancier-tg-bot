@@ -429,9 +429,24 @@ Click the <b>➕ Create</b> button in your pinned menu to get started!
         flow[step] = words_list
         self._save_flow(chat_id, flow)
 
-        # Send feedback and redisplay the keyword selection menu
+        # Send feedback
         sender.send_message(f"✓ '{word}' {action} {step}.", chat_id)
-        self._handle_create_filter_build_json(chat_id, driver, sender)
+
+        # Re-display the keyword selection menu without resetting flow
+        step_names = ["required", "any", "exclude"]
+        current_step_num = step_names.index(step) if step in step_names else 0
+        step_label = ["Step 1: Required Keywords", "Step 2: Optional Keywords", "Step 3: Exclude Keywords"][current_step_num]
+        text = f"📝 Build Keyword Filter - {step_label}\n\nCurrent selection: <b>{', '.join(words_list) or 'None'}</b>\n\nPick more words:"
+
+        rows = []
+        for i, word_opt in enumerate(known_words[:12]):
+            if i % 3 == 0:
+                rows.append([])
+            rows[-1].append((word_opt, f"filter:create:word:{i}"))
+
+        rows.append([("➕ Add Custom", "filter:create:custom"), ("Next →", "filter:create:step:next")])
+        sender.send_grid_menu(chat_id, text, rows)
+
         log.debug("Toggled word: chat_id=%s, word=%s, action=%s", chat_id, word, action)
 
     def _handle_create_filter_custom(self, chat_id: str, driver: DatabaseDriver, sender: TelegramSender) -> None:
@@ -457,10 +472,19 @@ Click the <b>➕ Create</b> button in your pinned menu to get started!
         if direction == "next":
             next_idx = min(current_idx + 1, len(step_order) - 1)
             if next_idx == current_idx:
+                # Generate suggested name from boolean expression
+                rules = {
+                    "required": flow.get("required", []),
+                    "any": flow.get("any", []),
+                    "exclude": flow.get("exclude", []),
+                }
+                suggested_name = render_boolean_expression(rules)
+
                 flow["step"] = "name"
                 flow["awaiting_name"] = True
+                flow["suggested_name"] = suggested_name
                 self._save_flow(chat_id, flow)
-                sender.send_message("📝 Give your filter a name (or /cancel):", chat_id)
+                sender.send_message(f"📝 Give your filter a name (or press enter to use: <code>{suggested_name}</code>):", chat_id)
                 return
 
             flow["step"] = step_order[next_idx]
@@ -575,6 +599,10 @@ Click the <b>➕ Create</b> button in your pinned menu to get started!
 
         elif flow.get("awaiting_name"):
             name = text.strip()
+            # Use suggested name (boolean expression) if user didn't provide one
+            if not name:
+                name = flow.get("suggested_name", "Unnamed Filter")
+
             flow["name"] = name
             flow["awaiting_name"] = False
             self._save_flow(chat_id, flow)
